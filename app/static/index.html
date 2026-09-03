@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Agent - Knowledge Base & Testing</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0a0a0f;
+            --card-bg: rgba(15, 15, 25, 0.8);
+            --primary: #6366f1;
+            --secondary: #8b5cf6;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --text-main: #e2e8f0;
+            --text-muted: #94a3b8;
+            --border-color: rgba(255, 255, 255, 0.1);
+            --glass-border: 1px solid rgba(255, 255, 255, 0.05);
+            --font-main: 'Inter', sans-serif;
+            --transition: all 0.2s ease;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: var(--font-main);
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 2rem;
+            line-height: 1.5;
+            background-image: radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
+                              radial-gradient(circle at 85% 30%, rgba(139, 92, 246, 0.08) 0%, transparent 50%);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 1024px) {
+            .container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .section {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        h2.glow-accent::before {
+            content: '';
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--primary);
+            box-shadow: 0 0 12px var(--primary);
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: var(--glass-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Forms & Inputs */
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        input[type="text"], textarea {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            color: var(--text-main);
+            font-family: var(--font-main);
+            font-size: 1rem;
+            transition: var(--transition);
+        }
+
+        input[type="text"]:focus, textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 120px;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .input-row input {
+            flex: 1;
+        }
+
+        /* Buttons */
+        button {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: var(--transition);
+            font-family: var(--font-main);
+            font-size: 0.95rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        button:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        button.primary {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border: none;
+            color: white;
+            font-weight: 600;
+        }
+
+        button.primary:hover:not(:disabled) {
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+            transform: translateY(-1px);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        button.icon-btn {
+            padding: 0.5rem;
+            border-radius: 6px;
+            color: var(--text-muted);
+        }
+
+        button.icon-btn:hover {
+            color: var(--error);
+            background: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.2);
+        }
+
+        /* Upload Zone */
+        @keyframes pulse {
+            0% { border-color: rgba(99, 102, 241, 0.3); }
+            50% { border-color: rgba(99, 102, 241, 0.6); }
+            100% { border-color: rgba(99, 102, 241, 0.3); }
+        }
+
+        .upload-zone {
+            border: 2px dashed var(--border-color);
+            border-radius: 12px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: var(--transition);
+            background: rgba(255, 255, 255, 0.02);
+            animation: pulse 3s infinite;
+        }
+
+        .upload-zone:hover, .upload-zone.drag-over {
+            border-color: var(--primary);
+            background: rgba(99, 102, 241, 0.05);
+            animation: none;
+        }
+
+        .upload-icon {
+            font-size: 2.5rem;
+            color: var(--primary);
+            margin-bottom: 1rem;
+        }
+
+        .upload-text {
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .upload-subtext {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            margin-bottom: 1rem;
+        }
+
+        .badges {
+            display: flex;
+            gap: 0.5rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .progress-bar-container {
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 1rem;
+            display: none;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+            display: none;
+        }
+
+        /* Document List */
+        .doc-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            max-height: 400px;
+            overflow-y: auto;
+            padding-right: 0.5rem;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.1); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+        .doc-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: var(--transition);
+        }
+
+        .doc-card:hover {
+            transform: translateY(-2px);
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .doc-info {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .doc-filename {
+            font-weight: 500;
+            font-size: 0.95rem;
+            word-break: break-all;
+        }
+
+        .doc-meta {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .doc-type-badge {
+            background: rgba(99, 102, 241, 0.1);
+            color: var(--primary);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            border: 1px dashed var(--border-color);
+            border-radius: 8px;
+        }
+
+        /* Response Card */
+        .response-card {
+            display: none;
+            animation: fadeIn 0.4s ease forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .answer-box {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+            white-space: pre-wrap;
+        }
+
+        .response-meta {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+        }
+
+        .confidence-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .confidence-badge.high {
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+        
+        .confidence-badge.medium {
+            background: rgba(245, 158, 11, 0.1);
+            color: var(--warning);
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.2);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+
+        .confidence-badge.low {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--error);
+            box-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .attempts-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.4rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+        }
+
+        .chunks-section {
+            border-top: 1px solid var(--border-color);
+            padding-top: 1rem;
+        }
+
+        .chunks-header {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        .chunks-header:hover {
+            color: var(--text-main);
+        }
+
+        .chunks-list {
+            display: none;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .chunks-list.expanded {
+            display: flex;
+        }
+
+        .chunk-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            padding: 0.75rem;
+        }
+
+        .chunk-meta {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .chunk-path {
+            color: var(--secondary);
+            font-family: monospace;
+        }
+
+        .chunk-score {
+            color: var(--success);
+        }
+
+        .chunk-content {
+            font-size: 0.85rem;
+            color: #cbd5e1;
+            line-height: 1.4;
+        }
+
+        /* Loaders */
+        .spinner {
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.8s linear infinite;
+            display: none;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        button.loading .spinner {
+            display: inline-block;
+        }
+
+        button.loading .btn-text {
+            display: none;
+        }
+
+        /* Toasts */
+        .toast-container {
+            position: fixed;
+            top: 1.5rem;
+            right: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            z-index: 1000;
+        }
+
+        .toast {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+            transform: translateX(120%);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            min-width: 300px;
+        }
+
+        .toast.show {
+            transform: translateX(0);
+        }
+
+        .toast.success { border-left: 4px solid var(--success); }
+        .toast.error { border-left: 4px solid var(--error); }
+        .toast.warning { border-left: 4px solid var(--warning); }
+        
+        .toast-icon {
+            font-size: 1.25rem;
+        }
+        
+        .toast.success .toast-icon { color: var(--success); }
+        .toast.error .toast-icon { color: var(--error); }
+        .toast.warning .toast-icon { color: var(--warning); }
+
+        .toast-content {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .toast-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        .toast-message {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <div class="toast-container" id="toastContainer"></div>
+
+    <div class="container">
+        <!-- Left Column: Knowledge Base -->
+        <div class="section">
+            <div class="card">
+                <h2 class="glow-accent">RAG Knowledge Base</h2>
+                
+                <div class="form-group" style="margin-top: 1.5rem;">
+                    <label for="orgId">Organization ID</label>
+                    <div class="input-row">
+                        <input type="text" id="orgId" value="cmp30euzm000228wd5fey2qo2" placeholder="Enter Organization ID">
+                        <button id="loadDocsBtn" onclick="loadDocuments()">Load Documents</button>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top: 1rem;">
+                    <label>Upload Document</label>
+                    <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+                        <div class="upload-icon">📄</div>
+                        <div class="upload-text">Drag & drop files here or click to browse</div>
+                        <div class="upload-subtext" id="uploadSubtext">Max file size: 50MB</div>
+                        <div class="badges">
+                            <span class="badge">PDF</span>
+                            <span class="badge">DOCX</span>
+                            <span class="badge">XLSX</span>
+                            <span class="badge">CSV</span>
+                            <span class="badge">TXT</span>
+                        </div>
+                        <input type="file" id="fileInput" accept=".pdf,.docx,.xlsx,.csv,.txt" onchange="handleFileSelect(event)">
+                        
+                        <div class="progress-bar-container" id="progressContainer">
+                            <div class="progress-bar" id="progressBar"></div>
+                        </div>
+                        <div class="progress-text" id="progressText">Uploading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Documents</h2>
+                <div class="doc-list" id="docList">
+                    <div class="empty-state">Enter Organization ID and click Load Documents</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column: Ask a Question -->
+        <div class="section">
+            <div class="card">
+                <h2 class="glow-accent" style="--primary: #8b5cf6;">Ask a Question</h2>
+                <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 0.5rem; margin-bottom: 1.5rem;">
+                    Test your RAG agent against the uploaded knowledge base.
+                </p>
+                
+                <div class="form-group">
+                    <textarea id="questionInput" placeholder="Ask anything about your knowledge base..."></textarea>
+                </div>
+                
+                <button class="primary" id="askBtn" style="width: 100%;" onclick="askQuestion()">
+                    <span class="spinner"></span>
+                    <span class="btn-text">Ask Agent</span>
+                </button>
+            </div>
+
+            <div class="card response-card" id="responseCard">
+                <div class="response-meta" id="responseMeta">
+                    <!-- Badges injected here -->
+                </div>
+                
+                <div class="answer-box" id="answerBox">
+                    <!-- Answer injected here -->
+                </div>
+                
+                <div class="chunks-section">
+                    <div class="chunks-header" onclick="toggleChunks()">
+                        <span>Source Chunks Used (<span id="chunkCount">0</span>)</span>
+                        <span id="chunksToggleIcon">▼</span>
+                    </div>
+                    <div class="chunks-list" id="chunksList">
+                        <!-- Chunks injected here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const orgIdInput = document.getElementById('orgId');
+        const fileInput = document.getElementById('fileInput');
+        const uploadZone = document.getElementById('uploadZone');
+        const uploadSubtext = document.getElementById('uploadSubtext');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const docList = document.getElementById('docList');
+        const questionInput = document.getElementById('questionInput');
+        const askBtn = document.getElementById('askBtn');
+        const responseCard = document.getElementById('responseCard');
+        
+        // State
+        let isUploading = false;
+        let isAsking = false;
+
+        // Utility: Toast Notifications
+        function showToast(title, message, type = 'success') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            
+            const icon = type === 'success' ? '✓' : (type === 'error' ? '✕' : '!');
+            
+            toast.innerHTML = `
+                <div class="toast-icon">${icon}</div>
+                <div class="toast-content">
+                    <div class="toast-title">${title}</div>
+                    <div class="toast-message">${message}</div>
+                </div>
+            `;
+            
+            container.appendChild(toast);
+            
+            setTimeout(() => toast.classList.add('show'), 10);
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+                setTimeout(() => toast.remove(), 300);
+            }, 5000);
+        }
+
+        // Utility: Format Date
+        function formatDate(dateString) {
+            const options = { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit' };
+            return new Date(dateString).toLocaleDateString(undefined, options);
+        }
+
+        // Utility: Format Size
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Drag and Drop Events
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            uploadZone.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            uploadZone.addEventListener(eventName, () => uploadZone.classList.add('drag-over'), false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            uploadZone.addEventListener(eventName, () => uploadZone.classList.remove('drag-over'), false);
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            if (isUploading) return;
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        function handleFileSelect(e) {
+            if (isUploading) return;
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        }
+
+        // File Upload
+        async function handleFile(file) {
+            const orgId = orgIdInput.value.trim();
+            if (!orgId) {
+                showToast('Error', 'Organization ID is required', 'error');
+                return;
+            }
+            
+            isUploading = true;
+            uploadSubtext.textContent = `${file.name} (${formatSize(file.size)})`;
+            progressContainer.style.display = 'block';
+            progressText.style.display = 'block';
+            progressBar.style.width = '30%';
+            progressText.textContent = 'Preparing upload...';
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('organization_id', orgId);
+
+            try {
+                progressBar.style.width = '60%';
+                progressText.textContent = 'Uploading and processing...';
+
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Upload failed');
+                }
+
+                progressBar.style.width = '100%';
+                progressText.textContent = 'Complete!';
+                
+                const result = await response.json();
+                showToast('Success', `Uploaded ${result.filename} (${result.chunks_created} chunks)`, 'success');
+                
+                loadDocuments();
+            } catch (error) {
+                showToast('Upload Failed', error.message, 'error');
+                progressBar.style.background = 'var(--error)';
+                progressText.textContent = 'Failed';
+            } finally {
+                setTimeout(() => {
+                    isUploading = false;
+                    progressContainer.style.display = 'none';
+                    progressText.style.display = 'none';
+                    progressBar.style.width = '0%';
+                    progressBar.style.background = 'linear-gradient(90deg, var(--primary), var(--secondary))';
+                    uploadSubtext.textContent = 'Max file size: 50MB';
+                    fileInput.value = '';
+                }, 2000);
+            }
+        }
+
+        // Load Documents
+        async function loadDocuments() {
+            const orgId = orgIdInput.value.trim();
+            if (!orgId) {
+                showToast('Error', 'Organization ID is required', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('loadDocsBtn');
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+
+            try {
+                const response = await fetch(`/documents?organization_id=${encodeURIComponent(orgId)}`);
+                if (!response.ok) throw new Error('Failed to fetch documents');
+                
+                const docs = await response.json();
+                renderDocuments(docs);
+            } catch (error) {
+                showToast('Error', error.message, 'error');
+                docList.innerHTML = `<div class="empty-state" style="color: var(--error)">Failed to load documents</div>`;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Load Documents';
+            }
+        }
+
+        function renderDocuments(docs) {
+            if (!docs || docs.length === 0) {
+                docList.innerHTML = `<div class="empty-state">No documents uploaded yet</div>`;
+                return;
+            }
+
+            docList.innerHTML = docs.map(doc => `
+                <div class="doc-card" id="doc-${doc.id}">
+                    <div class="doc-info">
+                        <div class="doc-filename">${escapeHtml(doc.filename)}</div>
+                        <div class="doc-meta">
+                            <span class="doc-type-badge">${escapeHtml(doc.source_type || 'Unknown')}</span>
+                            <span>${doc.chunks_count} chunks</span>
+                            <span>${formatDate(doc.created_at)}</span>
+                        </div>
+                    </div>
+                    <button class="icon-btn" onclick="deleteDocument('${doc.id}')" title="Delete">
+                        🗑️
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        // Delete Document
+        async function deleteDocument(docId) {
+            if (!confirm('Are you sure you want to delete this document and all its chunks?')) return;
+            
+            const orgId = orgIdInput.value.trim();
+            if (!orgId) {
+                showToast('Missing Org ID', 'Enter an Organization ID first', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`/documents/${docId}?organization_id=${encodeURIComponent(orgId)}`, {
+                    method: 'DELETE'
+                });
+                
+                if (!response.ok) throw new Error('Failed to delete document');
+                
+                showToast('Deleted', 'Document removed successfully', 'success');
+                const el = document.getElementById(`doc-${docId}`);
+                if (el) {
+                    el.style.opacity = '0';
+                    setTimeout(() => loadDocuments(), 300);
+                } else {
+                    loadDocuments();
+                }
+            } catch (error) {
+                showToast('Error', error.message, 'error');
+            }
+        }
+
+        // Ask Question
+        async function askQuestion() {
+            const orgId = orgIdInput.value.trim();
+            const question = questionInput.value.trim();
+            
+            if (!orgId) {
+                showToast('Error', 'Organization ID is required', 'warning');
+                return;
+            }
+            if (!question) {
+                showToast('Error', 'Please enter a question', 'warning');
+                return;
+            }
+            
+            if (isAsking) return;
+            isAsking = true;
+            
+            askBtn.classList.add('loading');
+            askBtn.disabled = true;
+            responseCard.style.display = 'none';
+            document.getElementById('chunksList').classList.remove('expanded');
+            document.getElementById('chunksToggleIcon').textContent = '▼';
+
+            try {
+                const response = await fetch('/ask/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        question: question,
+                        organization_id: orgId
+                    })
+                });
+
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Failed to get answer');
+                }
+
+                const result = await response.json();
+                renderResponse(result);
+            } catch (error) {
+                showToast('Error', error.message, 'error');
+            } finally {
+                isAsking = false;
+                askBtn.classList.remove('loading');
+                askBtn.disabled = false;
+            }
+        }
+
+        function renderResponse(result) {
+            const metaContainer = document.getElementById('responseMeta');
+            const answerBox = document.getElementById('answerBox');
+            const chunksList = document.getElementById('chunksList');
+            const chunkCount = document.getElementById('chunkCount');
+            
+            let confClass = 'low';
+            if (result.confidence_level === 'green') confClass = 'high';
+            else if (result.confidence_level === 'yellow') confClass = 'medium';
+            
+            // Backend already returns confidence_score on a 0-100 scale — do NOT multiply by 100 again.
+            const confPercent = result.confidence_score ? Math.round(result.confidence_score) : 0;
+            
+            metaContainer.innerHTML = `
+                <div class="confidence-badge ${confClass}">
+                    Confidence: ${result.confidence_level || 'UNKNOWN'} (${confPercent}%)
+                </div>
+                <div class="attempts-badge">
+                    Generation Attempts: ${result.attempts || 1}
+                </div>
+            `;
+            
+            answerBox.textContent = result.answer || 'No answer generated.';
+            
+            const chunks = result.source_chunks || [];
+            chunkCount.textContent = chunks.length;
+            
+            if (chunks.length === 0) {
+                chunksList.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem;">No source chunks used.</div>';
+            } else {
+                chunksList.innerHTML = chunks.map(chunk => `
+                    <div class="chunk-card">
+                        <div class="chunk-meta">
+                            <span class="chunk-path">${escapeHtml(chunk.heading_path || 'Unknown Source')}</span>
+                            <span class="chunk-score">Score: ${(chunk.combined_score || 0).toFixed(3)}</span>
+                        </div>
+                        <div class="chunk-content">${escapeHtml(chunk.content || '')}</div>
+                    </div>
+                `).join('');
+            }
+            
+            responseCard.style.display = 'block';
+        }
+
+        function toggleChunks() {
+            const list = document.getElementById('chunksList');
+            const icon = document.getElementById('chunksToggleIcon');
+            
+            if (list.classList.contains('expanded')) {
+                list.classList.remove('expanded');
+                icon.textContent = '▼';
+            } else {
+                list.classList.add('expanded');
+                icon.textContent = '▲';
+            }
+        }
+
+        function escapeHtml(unsafe) {
+            if (!unsafe) return '';
+            return unsafe
+                 .toString()
+                 .replace(/&/g, "&amp;")
+                 .replace(/</g, "&lt;")
+                 .replace(/>/g, "&gt;")
+                 .replace(/"/g, "&quot;")
+                 .replace(/'/g, "&#039;");
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            if (orgIdInput.value.trim()) {
+                loadDocuments();
+            }
+        });
+    </script>
+</body>
+</html>

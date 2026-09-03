@@ -1,0 +1,35 @@
+# Virtual Environment (Matches your active .venv folder)
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables & Secrets (CRITICAL - Keeps your Groq & Neon keys safe)
+.env
+.env.*
+.env.example
+*.env
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Model Weights & HuggingFace Cache (Local sentence-transformers)
+.cache/
+huggingface/
+torch/
+
+# Evaluation dumps, logs, and temp uploads
+*.log
+tmp/
+temp/
+RAG-Evaluation-*.json
+
+# OS & Editor Artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
