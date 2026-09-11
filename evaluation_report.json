@@ -1,0 +1,95 @@
+[
+  {
+    "id": "Q1",
+    "question": "What is the standard employee annual PTO accrual rate?",
+    "passed": true,
+    "reasons": [],
+    "score": 89.25,
+    "level": "green",
+    "attempts": 1,
+    "duration": 13.72,
+    "answer": "The PTO accrual rate is tiered by tenure. Employees with 0\u20132\u202fyears of service accrue 4.61\u202fhours per pay period, those with 3\u20135\u202fyears accrue 6.15\u202fhours per pay period, and employees with more than 6\u202fyears accrue 7.69\u202fhours per pay period. Correspondingly, the annual PTO allowance is 15\u202fbusiness days for 0\u20132\u202fyears, 20\u202fbusiness days for 3\u20135\u202fyears, and 25\u202fbusiness days for 6+\u202fyears."
+  },
+  {
+    "id": "Q2",
+    "question": "What interest rate do we pay vendors if we remit payment past 30 days?",
+    "passed": false,
+    "reasons": [
+      "Band mismatch: expected yellow, got green",
+      "Score above max: 87.12 > 59.0"
+    ],
+    "score": 87.12,
+    "level": "green",
+    "attempts": 1,
+    "duration": 4.81,
+    "answer": "The provided agreements do not specify an interest rate that our company pays to vendors for payments made after the 30\u2011day due date."
+  },
+  {
+    "id": "Q3",
+    "question": "Confirm that our multi-region failover completes within 10 seconds as required by SOC 2.",
+    "passed": true,
+    "reasons": [],
+    "score": 58.0,
+    "level": "yellow",
+    "attempts": 1,
+    "duration": 6.93,
+    "answer": "Our documented automatic failover times do not meet a 10\u2011second window. The Core API, which operates in a multi\u2011region active\u2011active model, fails over in under 30\u202fseconds; the primary database, replicated synchronously across AZs, fails over in under 60\u202fseconds; background job processing switches in under five minutes; and object storage replicates near\u2011instantly. No component is specified to complete a multi\u2011region failover within 10\u202fseconds, and the SOC\u202f2 requirement for that metric is not addressed in the provided policies. Consequently, we cannot confirm compliance with a 10\u2011second multi\u2011region failover target."
+  },
+  {
+    "id": "Q4",
+    "question": "What was the finding in our 2025 penetration test executive summary?",
+    "passed": true,
+    "reasons": [],
+    "score": 53.29,
+    "level": "yellow",
+    "attempts": 1,
+    "duration": 3.63,
+    "answer": "The provided documentation does not contain any information regarding the findings of the 2025 penetration test executive summary."
+  },
+  {
+    "id": "Q5",
+    "status": "ERROR",
+    "error": "Server error '500 Internal Server Error' for url 'http://localhost:8000/ask/test'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+    "duration": 9.278683100001217
+  },
+  {
+    "id": "Q6",
+    "status": "ERROR",
+    "error": "Server error '500 Internal Server Error' for url 'http://localhost:8000/ask/test'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+    "duration": 9.85390660000121
+  },
+  {
+    "id": "Q7",
+    "question": "What are the mandatory logging actions under policy ISO-SEC-2026-REV2?",
+    "passed": true,
+    "reasons": [],
+    "score": 58.0,
+    "level": "yellow",
+    "attempts": 1,
+    "duration": 5.05,
+    "answer": "The provided documentation does not contain any reference to policy ISO\u2011SEC\u20112026\u2011REV2 or to mandatory logging actions associated with that policy."
+  },
+  {
+    "id": "Q8",
+    "status": "ERROR",
+    "error": "Server error '500 Internal Server Error' for url 'http://localhost:8000/ask/test'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+    "duration": 10.667703300001449
+  },
+  {
+    "id": "Q9",
+    "status": "ERROR",
+    "error": "Server error '500 Internal Server Error' for url 'http://localhost:8000/ask/test'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+    "duration": 9.917028799998661
+  },
+  {
+    "id": "Q10",
+    "question": "How many days does the company have to notify authorities and impacted clients of a breach?",
+    "passed": true,
+    "reasons": [],
+    "score": 76.29,
+    "level": "yellow",
+    "attempts": 1,
+    "duration": 10.08,
+    "answer": "The company must notify the supervisory authority within three days of becoming aware of a personal\u2011data breach. Affected individuals are to be informed without undue delay\u2014that is, as soon as practicable once the breach is confirmed. No separate day\u2011count is prescribed for client notification."
+  }
+]

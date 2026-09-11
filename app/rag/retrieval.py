@@ -1,6 +1,8 @@
 import json
+import math
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 
 from app.db.pool import get_pool
 from app.rag.embeddings import embed
@@ -18,6 +20,7 @@ class RetrievedChunk:
     content_type: str = "text"
     created_at: str | None = None
     times_used: int = 0
+    effective_date: str | None = None
 
 
 def sanitize_query(query: str) -> str:
@@ -33,6 +36,28 @@ def sanitize_query(query: str) -> str:
 # results' contributions decay. k=60 is broadly suitable; no per-corpus
 # tuning needed in practice.
 RRF_K = 60
+
+
+def _calculate_recency_multiplier(effective_date_val) -> float:
+    """Calculates up to a 25% rank boost for active documents effective within
+    the last 365 days, decaying exponentially toward 1.0 (neutral) for older documents.
+    """
+    if not effective_date_val:
+        return 1.0
+
+    if isinstance(effective_date_val, str):
+        try:
+            doc_date = datetime.strptime(effective_date_val, "%Y-%m-%d").date()
+        except ValueError:
+            return 1.0
+    elif isinstance(effective_date_val, date):
+        doc_date = effective_date_val
+    else:
+        return 1.0
+
+    days_old = max(0, (date.today() - doc_date).days)
+    boost = 0.25 * math.exp(-days_old / 365.0)
+    return 1.0 + boost
 
 
 # Hybrid search: rank chunks by Reciprocal Rank Fusion (RRF) of
@@ -55,7 +80,7 @@ RRF_K = 60
 _HYBRID_SQL = """
 WITH vector_ranked AS (
     SELECT c.id, c.document_id, c.content, c.heading_path, c.created_at, c.times_used,
-           c.metadata,
+           c.metadata, d.effective_date,
            1 - (c.embedding <=> $1::vector) AS vector_score,
            ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vector_rank
     FROM rag_chunks c
@@ -66,7 +91,7 @@ WITH vector_ranked AS (
 ),
 keyword_ranked AS (
     SELECT c.id, c.document_id, c.content, c.heading_path, c.created_at, c.times_used,
-           c.metadata,
+           c.metadata, d.effective_date,
            ts_rank(c.tsv, websearch_to_tsquery('english', $3)) AS keyword_score,
            ROW_NUMBER() OVER (ORDER BY ts_rank(c.tsv, websearch_to_tsquery('english', $3)) DESC) AS keyword_rank
     FROM rag_chunks c
@@ -84,6 +109,7 @@ SELECT
     COALESCE(v.created_at, k.created_at) AS created_at,
     COALESCE(v.times_used, k.times_used) AS times_used,
     COALESCE(v.metadata, k.metadata) AS metadata,
+    COALESCE(v.effective_date, k.effective_date) AS effective_date,
     COALESCE(v.vector_score, 0) AS vector_score,
     COALESCE(k.keyword_score, 0) AS keyword_score,
     v.vector_rank,
@@ -115,6 +141,10 @@ async def hybrid_search(
         if r["keyword_rank"] is not None:
             rrf_score += 1.0 / (RRF_K + r["keyword_rank"])
 
+        # Temporal boost: up to 25% higher RRF for recent docs
+        recency_mult = _calculate_recency_multiplier(r["effective_date"])
+        final_score = rrf_score * recency_mult
+
         # Parse content_type from chunk metadata (set by chunker at ingestion)
         chunk_meta = r["metadata"]
         if isinstance(chunk_meta, str):
@@ -126,6 +156,8 @@ async def hybrid_search(
             chunk_meta = {}
         content_type = chunk_meta.get("content_type", "text") if isinstance(chunk_meta, dict) else "text"
 
+        effective_date_str = r["effective_date"].isoformat() if r["effective_date"] else None
+
         results.append(
             RetrievedChunk(
                 id=str(r["id"]),
@@ -134,10 +166,11 @@ async def hybrid_search(
                 heading_path=r["heading_path"],
                 vector_score=float(r["vector_score"]),
                 keyword_score=float(r["keyword_score"]),
-                combined_score=rrf_score,
+                combined_score=final_score,
                 content_type=content_type,
                 created_at=r["created_at"].isoformat() if r["created_at"] else None,
                 times_used=r["times_used"] or 0,
+                effective_date=effective_date_str,
             )
         )
 

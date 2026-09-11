@@ -102,28 +102,28 @@ _APOS = "[\'\u2019]?"
 
 # Tier 1: unambiguous — safe to match anywhere in the answer text.
 _STRONG_REFUSAL_PATTERNS = [
-    rf"(?:don{_APOS}t|do not|doesn{_APOS}t|does not)\s+(?:contain|mention|cover|see|find)",
-    r"(?:no|not any|no specific)\s+(?:information|mention|details?|data|reference|coverage)",
+    rf"(?:don{_APOS}t|do not|doesn{_APOS}t|does not)\s+(?:contain|mention|cover|see|find|specify|state|detail|prescribe)",
+    r"(?:no|not any|no specific)\s+(?:information|mention|details?|data|reference|coverage|terms?|provisions?)",
     r"(?:no|without)\s+mention\s+of",
-    rf"(?:can{_APOS}t|cannot|unable to)\s+(?:confirm|find|locate|identify|determine|verify|describe)",
+    rf"(?:can{_APOS}t|cannot|unable to)\s+(?:confirm|find|locate|identify|determine|verify|describe|provide)",
     rf"(?:don{_APOS}t|do not)\s+(?:appear|seem)\s+to",
     r"(?:no|not)\s+(?:seeing|aware of)",
     rf"(?:i{_APOS}m not seeing|i{_APOS}m not aware)",
     r"not\s+(?:contain)\s+any\s+information",
-    r"(?:absent|missing)\s+from\s+(?:the\s+)?(?:documents?|sources?|context|provided|materials)",
-    r"provided\s+(?:materials?|documents?|sources?|context)\s+(?:don|do|does)",
+    r"(?:absent|missing)\s+from\s+(?:the\s+)?(?:documents?|sources?|context|provided|materials?|agreements?|policies)",
+    r"provided\s+(?:materials?|documents?|sources?|context|agreements?|policies)\s+(?:don|do|does|did)",
 ]
 
-# Tier 2: ambiguous on their own (also match legitimate restriction
-# language like "access is not available"). Only counts as a refusal
-# signal if the answer ALSO self-references the source material nearby.
+# Tier 2: ambiguous on their own. Requires co-occurrence with source self-reference.
 _WEAK_REFUSAL_PATTERNS = [
-    r"not\s+(?:mentioned|covered|addressed|included|found|available|aware)",
-    rf"(?:isn{_APOS}t|is not)\s+(?:mentioned|covered|addressed|included|available)",
-    rf"(?:don{_APOS}t|do not|doesn{_APOS}t|does not)\s+(?:have|include)",
+    r"not\s+(?:mentioned|covered|addressed|included|found|available|aware|specified|detailed|stated)",
+    rf"(?:isn{_APOS}t|is not)\s+(?:mentioned|covered|addressed|included|available|specified|detailed|stated)",
+    rf"(?:don{_APOS}t|do not|doesn{_APOS}t|does not)\s+(?:have|include|specify|state|detail)",
 ]
+
 _SELF_REFERENCE_RE = re.compile(
-    r"(?:materials?|documents?|sources?|context|provided|information)", re.IGNORECASE
+    r"(?:materials?|documents?|sources?|context|provided|information|agreements?|policies|contracts?)",
+    re.IGNORECASE,
 )
 
 
