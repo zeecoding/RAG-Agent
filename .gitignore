@@ -26,6 +26,7 @@ torch/
 tmp/
 temp/
 RAG-Evaluation-*.json
+evaluation_report.json
 
 # OS & Editor Artifacts
 .DS_Store
