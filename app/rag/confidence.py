@@ -106,16 +106,36 @@ _SELF_REFERENCE_RE = re.compile(
 )
 
 
-def _answer_relevance_score(answer_text: str, is_refusal: bool | None = None) -> float:
+def _answer_relevance_score(
+    question: str,
+    answer_text: str,
+    is_refusal: bool | None = None,
+) -> float:
+    # 1. Primary Gate: LLM Structured Output Validator
     if is_refusal is True:
         return 0.2
+
+    # 2. Secondary Gate: Regex + Grounding Check (Defense in Depth)
     lower = answer_text.lower()
-    for pattern in _STRONG_REFUSAL_PATTERNS:
-        if re.search(pattern, lower):
+    regex_hit = any(re.search(p, lower) for p in _STRONG_REFUSAL_PATTERNS)
+    if not regex_hit:
+        regex_hit = any(
+            re.search(p, lower) and _SELF_REFERENCE_RE.search(lower)
+            for p in _WEAK_REFUSAL_PATTERNS
+        )
+
+    if regex_hit:
+        # Check if the answer actually addresses the question's specific subjects.
+        # A valid premise rejection quotes/mentions the question's key nouns.
+        # A lazy refusal ("I cannot find...") shares almost no nouns with the question.
+        q_terms = {t.lower() for t in re.findall(r"[A-Za-z0-9\-]{4,}", question)}
+        ans_terms = {t.lower() for t in re.findall(r"[A-Za-z0-9\-]{4,}", answer_text)}
+        overlap = len(q_terms & ans_terms) / max(len(q_terms), 1)
+
+        # If it matches refusal patterns AND does not reuse question concepts, it's a real refusal
+        if overlap < 0.25:
             return 0.2
-    for pattern in _WEAK_REFUSAL_PATTERNS:
-        if re.search(pattern, lower) and _SELF_REFERENCE_RE.search(lower):
-            return 0.2
+
     return 1.0
 
 
@@ -129,13 +149,18 @@ def score_answer(
     direction_mismatch: bool | None = None,
     validation_passed: bool = True,
 ) -> tuple[float, str, dict]:
-    """Scores draft compliance responses across factual and heuristic dimensions."""
     keyword = _keyword_match_score(question, chunks)
     semantic = _semantic_score(chunks)
     source_quality = _source_quality_score(chunk_metadata or [], conflict_detected=conflict_detected)
     completeness = _completeness_score(answer_text)
     agreement = _source_agreement_score(conflict_detected)
-    relevance = _answer_relevance_score(answer_text, is_refusal=is_refusal)
+    
+    # Pass question and answer directly into relevance validation
+    relevance = _answer_relevance_score(
+        question=question,
+        answer_text=answer_text,
+        is_refusal=is_refusal,
+    )
     direction = _direction_mismatch_score(direction_mismatch)
 
     raw_score = (
@@ -148,13 +173,11 @@ def score_answer(
         + DIRECTION_MISMATCH_WEIGHT * direction
     ) * 100
 
-    # Penalize answers rejected by the 120B validator
     if not validation_passed:
         score = raw_score * VALIDATION_PENALTY
     else:
         score = raw_score
 
-    # Clamp detected refusals to the 50-58% Yellow band
     if relevance < 0.5:
         score = min(58.0, max(50.0, score * 0.85))
 

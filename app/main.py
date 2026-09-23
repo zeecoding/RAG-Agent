@@ -437,6 +437,7 @@ class AskTestResponse(BaseModel):
     confidence_breakdown: dict
     attempts: int
     source_chunks: list[dict]
+    initial_validation_passed: bool | None = None
 
 
 @app.post("/ask/test", response_model=AskTestResponse)
@@ -476,6 +477,7 @@ async def ask_test(req: AskTestRequest):
         confidence_breakdown=result["confidence_breakdown"],
         attempts=result["attempts"],
         source_chunks=source_chunks,
+        initial_validation_passed=result.get("initial_validation_passed", True)
     )
 
 
@@ -493,7 +495,7 @@ class AskResponse(BaseModel):
     confidence_breakdown: dict
     attempts: int
     source_chunk_ids: list[str]
-
+    initial_validation_passed: bool | None = None
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest):
@@ -527,7 +529,7 @@ async def ask(req: AskRequest):
                 WHERE id = $4 AND organization_id = $5
                 """,
                 result["draft"],
-                int(result["confidence_score"]),
+                int(round(result["confidence_score"])),
                 new_status,
                 req.question_id,
                 req.organization_id,
@@ -554,6 +556,7 @@ async def ask(req: AskRequest):
         confidence_breakdown=result["confidence_breakdown"],
         attempts=result["attempts"],
         source_chunk_ids=chunk_ids,
+        initial_validation_passed=result.get("initial_validation_passed", True)
     )
 
 
