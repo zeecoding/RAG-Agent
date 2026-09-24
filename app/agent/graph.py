@@ -108,7 +108,13 @@ SYSTEM_VALIDATE = (
     "   - Premise Rejection: If the draft correctly rejects an unsupported number in the question, mark verdict_passed as TRUE.\n"
     "   - Set false if the draft hallucinates ungrounded metrics or adopts false premises from the question.\n\n"
     "3. verdict_reason: Explain failure if verdict_passed is false.\n\n"
-    "4. is_refusal: Set true if the draft states the information is absent, not covered, or unknown."
+    "4. is_refusal:\n"
+    "   - Set TRUE if the draft states or implies that the requested information is genuinely absent "
+    "from the retrieved context (e.g., 'The documentation does not address...', 'No such policy "
+    "exists in the provided materials').\n"
+    "   - Set FALSE if the draft confidently rejects a false or mismatched premise using facts it "
+    "DID find in the context (e.g., 'The premise is incorrect; the documented SLA is 30 days, not 60'). "
+    "A factual correction grounded in real context is NOT a refusal — it is a substantive, grounded answer."
 )
 
 
@@ -212,6 +218,34 @@ async def node_validate(state: AgentState) -> AgentState:
 def route_after_validate(state: AgentState) -> str:
     if state.get("validation_passed"):
         return "score"
+
+    # TODO(retrieval-requery): When validation fails specifically because
+    # grounding is weak (not direction_mismatch, not a phrasing/hallucination
+    # issue), redrafting against the same retrieved chunks will not help.
+    # The correct fix is a "requery" edge that:
+    #   1. Detects weak grounding via retrieval_confidence < threshold
+    #      (e.g., mean RRF < 0.025) combined with validation failure.
+    #   2. Reformulates the query (e.g., extract key entities, broaden terms)
+    #      and re-runs hybrid_search with the new query.
+    #   3. Merges new chunks with existing ones (dedup by chunk ID).
+    #   4. Routes to draft with the expanded context.
+    #   5. Limits requery to 1 attempt to prevent infinite loops.
+    # This requires adding a "requery" node to the StateGraph and a new
+    # state field (requery_attempted: bool). The node would call
+    # hybrid_search with a reformulated query and update the chunks list.
+    # Estimated scope: ~50 LOC across graph.py + a new query reformulation
+    # helper. Deferring to a dedicated PR to keep this change focused.
+
+    if not state.get("direction_mismatch") and not state.get("validation_passed"):
+        # Validation failed without a direction mismatch — likely a retrieval
+        # gap (the chunks don't contain the needed information) rather than a
+        # drafting failure. Redrafting against the same chunks is unlikely to
+        # help, but we don't yet have a requery path. Log for observability.
+        logger.warning(
+            "Validation failed without direction_mismatch — possible retrieval gap. "
+            "Question: %s", state.get("question", "")[:100]
+        )
+
     if state.get("attempts", 0) >= settings.max_refine_attempts:
         return "score"
     return "draft"
@@ -225,6 +259,16 @@ async def node_score(state: AgentState) -> AgentState:
     direction_mismatch = state.get("direction_mismatch")
     val_passed = state.get("validation_passed", False)  # <-- Changed default to False
 
+    # Compute mean RRF combined_score as a direct retrieval quality signal.
+    # This is more informative than the per-signal proxies (keyword_match,
+    # semantic_similarity) because combined_score encodes how well each chunk
+    # matched BOTH vector and keyword search relative to the full corpus,
+    # including the temporal recency boost. The per-signal proxies only
+    # reconstruct partial views from raw scores on different scales.
+    retrieval_confidence = (
+        sum(c.combined_score for c in chunks) / len(chunks) if chunks else 0.0
+    )
+
     score, level, breakdown = score_answer(
         state["question"],
         state["draft"],
@@ -234,6 +278,7 @@ async def node_score(state: AgentState) -> AgentState:
         is_refusal=is_refusal,
         direction_mismatch=direction_mismatch,
         validation_passed=val_passed,
+        retrieval_confidence=retrieval_confidence,
     )
     logger.info(f"node_score: score={score}, level={level}, breakdown={breakdown}")
     return {"confidence_score": score, "confidence_level": level, "confidence_breakdown": breakdown}

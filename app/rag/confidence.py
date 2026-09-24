@@ -1,7 +1,10 @@
+import logging
 import re
 from datetime import datetime, timezone
 
 from app.rag.retrieval import RetrievedChunk
+
+logger = logging.getLogger(__name__)
 
 KEYWORD_WEIGHT = 0.12
 SEMANTIC_WEIGHT = 0.22
@@ -11,6 +14,17 @@ SOURCE_AGREEMENT_WEIGHT = 0.18
 ANSWER_RELEVANCE_WEIGHT = 0.18
 DIRECTION_MISMATCH_WEIGHT = 0.14
 VALIDATION_PENALTY = 0.40  # Reduces confidence to <50% (Red) when ungrounded
+
+# Weak-retrieval hard gate thresholds.
+# Calibrated against RAG-Evaluation-V4.json: all well-grounded green answers
+# had keyword_match >= 0.6 and semantic_similarity >= 0.75. The Q21 failure
+# case (weak retrieval, defensible answer, false-green) was at 0.462 / 0.623.
+# Both thresholds must be breached simultaneously — a single weak signal may
+# just reflect unusual vocabulary or embedding compression, not a true
+# retrieval gap.
+WEAK_RETRIEVAL_KEYWORD_THRESHOLD = 0.55
+WEAK_RETRIEVAL_SEMANTIC_THRESHOLD = 0.70
+WEAK_RETRIEVAL_SCORE_CAP = 79.0  # Max score when gate fires (top of yellow)
 
 
 def _keyword_match_score(question: str, chunks: list[RetrievedChunk]) -> float:
@@ -111,11 +125,17 @@ def _answer_relevance_score(
     answer_text: str,
     is_refusal: bool | None = None,
 ) -> float:
-    # 1. Primary Gate: LLM Structured Output Validator
+    # Primary Gate: LLM Structured Output Validator is the sole authority
+    # for refusal classification. It reads the actual retrieved context and
+    # can distinguish "information genuinely absent" from "confidently
+    # rejecting a false premise using facts it found."
     if is_refusal is True:
         return 0.2
 
-    # 2. Secondary Gate: Regex + Grounding Check (Defense in Depth)
+    # Diagnostic layer: regex patterns detect refusal-like phrasing for
+    # observability. When the regex fires but is_refusal is False, we log
+    # a warning for drift detection but do NOT override the score — the
+    # 120B validator has strictly more information than a regex can access.
     lower = answer_text.lower()
     regex_hit = any(re.search(p, lower) for p in _STRONG_REFUSAL_PATTERNS)
     if not regex_hit:
@@ -124,17 +144,12 @@ def _answer_relevance_score(
             for p in _WEAK_REFUSAL_PATTERNS
         )
 
-    if regex_hit:
-        # Check if the answer actually addresses the question's specific subjects.
-        # A valid premise rejection quotes/mentions the question's key nouns.
-        # A lazy refusal ("I cannot find...") shares almost no nouns with the question.
-        q_terms = {t.lower() for t in re.findall(r"[A-Za-z0-9\-]{4,}", question)}
-        ans_terms = {t.lower() for t in re.findall(r"[A-Za-z0-9\-]{4,}", answer_text)}
-        overlap = len(q_terms & ans_terms) / max(len(q_terms), 1)
-
-        # If it matches refusal patterns AND does not reuse question concepts, it's a real refusal
-        if overlap < 0.25:
-            return 0.2
+    if regex_hit and is_refusal is False:
+        logger.warning(
+            "Regex refusal pattern detected but is_refusal=False from validator; "
+            "deferring to validator. Answer excerpt: %s",
+            answer_text[:120],
+        )
 
     return 1.0
 
@@ -148,7 +163,20 @@ def score_answer(
     is_refusal: bool | None = None,
     direction_mismatch: bool | None = None,
     validation_passed: bool = True,
+    retrieval_confidence: float | None = None,
 ) -> tuple[float, str, dict]:
+    """Score a drafted answer on a 0-100 scale from seven weighted signals.
+
+    Args:
+        retrieval_confidence: Mean RRF combined_score of retrieved chunks.
+            This is a better signal of retrieval quality than the per-signal
+            proxies (keyword_match, semantic_similarity) because it encodes
+            how well each chunk matched BOTH vector and keyword search
+            relative to the entire corpus, including the temporal recency
+            boost. The per-signal proxies reconstruct partial views from
+            raw scores that sit on different scales. Threading the actual
+            RRF score avoids this information loss.
+    """
     keyword = _keyword_match_score(question, chunks)
     semantic = _semantic_score(chunks)
     source_quality = _source_quality_score(chunk_metadata or [], conflict_detected=conflict_detected)
@@ -181,6 +209,29 @@ def score_answer(
     if relevance < 0.5:
         score = min(58.0, max(50.0, score * 0.85))
 
+    # ── Weak-Retrieval Hard Gate ─────────────────────────────────────────
+    # When BOTH retrieval-evidence signals are below their calibrated
+    # thresholds, the five default-to-1.0 signals cannot be trusted to
+    # reflect genuine confidence — they merely reflect the absence of a
+    # detected problem, not the presence of strong evidence. Cap the score
+    # at the top of yellow to force human review.
+    #
+    # This gate is intentionally an explicit, named block (not a silent
+    # weight adjustment) so it is visible in code review and independently
+    # testable. See WEAK_RETRIEVAL_* constants for threshold rationale.
+    weak_retrieval_gate_fired = False
+    if keyword < WEAK_RETRIEVAL_KEYWORD_THRESHOLD and semantic < WEAK_RETRIEVAL_SEMANTIC_THRESHOLD:
+        if score > WEAK_RETRIEVAL_SCORE_CAP:
+            logger.info(
+                "Weak-retrieval gate fired: keyword=%.3f (<%s), semantic=%.3f (<%s). "
+                "Capping score from %.2f to %.1f (yellow).",
+                keyword, WEAK_RETRIEVAL_KEYWORD_THRESHOLD,
+                semantic, WEAK_RETRIEVAL_SEMANTIC_THRESHOLD,
+                score, WEAK_RETRIEVAL_SCORE_CAP,
+            )
+            score = WEAK_RETRIEVAL_SCORE_CAP
+        weak_retrieval_gate_fired = True
+
     if score >= 80:
         level = "green"
     elif score >= 50:
@@ -197,6 +248,8 @@ def score_answer(
         "answer_relevance": round(relevance, 3),
         "direction_mismatch": round(direction, 3),
         "validation_passed": validation_passed,
+        "retrieval_confidence": round(retrieval_confidence, 4) if retrieval_confidence is not None else None,
+        "weak_retrieval_gate_fired": weak_retrieval_gate_fired,
     }
 
     return round(score, 2), level, breakdown
