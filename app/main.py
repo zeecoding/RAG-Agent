@@ -1,17 +1,18 @@
 import asyncio
-import json
 import hashlib
+import json
 import logging
 import os
 import tempfile
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.agent.graph import run_agent
 from app.config import settings
@@ -20,6 +21,11 @@ from app.rag.chunker import chunk_sections
 from app.rag.embeddings import embed, embed_batch
 from app.rag.enrichment import enrich_document_metadata
 from app.rag.groq_client import init_groq, close_groq
+from app.rag.guardrails import (
+    extract_email_domains_from_text,
+    scan_content_for_injection_patterns,
+    scan_document_intelligently,
+)
 from app.rag.parser import parse_file
 from app.rag.retrieval import mark_chunks_used
 
@@ -39,8 +45,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="RFP Compliance Agent — RAG Core", lifespan=lifespan)
 
 # CORS — allow the upload UI and any local frontend.
-# allow_credentials=True is intentionally NOT set: this API uses no cookies/
-# auth, and browsers reject wildcard origin + credentials together anyway.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -75,16 +79,7 @@ ALLOWED_EXTENSIONS = set(settings.allowed_extensions.split(","))
 
 
 def _table_to_embedding_text(chunk) -> str:
-    """Convert a table chunk into a richer natural-language representation for embedding.
-
-    Raw markdown tables (| col1 | col2 |) embed poorly against natural-language queries
-    because embedding models are trained on prose, not pipe-delimited syntax.
-    This generates natural-language context sentences from table rows and appends them
-    to the raw markdown table (along with section heading context).
-
-    The raw markdown table is still stored in rag_chunks.content for the LLM to see;
-    this enriched text is only used for computing the embedding vector.
-    """
+    """Convert a table chunk into a richer natural-language representation for embedding."""
     lines = [line.strip() for line in chunk.content.strip().split("\n") if line.strip()]
     if len(lines) < 3:
         prefix = f"Section: {chunk.heading_path}\n" if chunk.heading_path else ""
@@ -161,9 +156,7 @@ async def upload_file(
     if org is None:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    # Reject duplicate uploads — same content or same filename within the
-    # same organization. Catches both exact re-uploads (same bytes) and
-    # filename collisions that would confuse the knowledge base.
+    # Reject duplicate uploads
     async with pool.acquire() as conn:
         dup = await conn.fetchrow(
             """
@@ -200,6 +193,58 @@ async def upload_file(
             )
         logger.info(f"Parsed {len(sections)} sections from {filename}")
 
+        # Ingestion Document Poisoning Guardrail (Option a):
+        # Run deterministic regex triage over full text before chunking or embedding.
+        # If triggered, escalate to intelligent LLM scanner on targeted windows
+        # around the suspicious matches to verify if it represents an actual attack payload.
+        text_sections = [s for s in sections if s.content_type == "text"]
+        full_text = "\n".join(s.content for s in text_sections)
+
+        if full_text and scan_content_for_injection_patterns(full_text):
+            logger.warning(
+                "Suspicious prompt injection patterns detected in '%s' (org=%s). "
+                "Escalating to intelligent scanner...",
+                filename,
+                organization_id,
+            )
+            is_injected, verdict = await scan_document_intelligently(full_text)
+            if is_injected:
+                risk_cat = verdict.risk_category if verdict else "instruction_override"
+                reason = verdict.explanation if verdict else "Suspicious prompt injection payload detected"
+                logger.warning(
+                    "DOCUMENT_INJECTION_BLOCKED: '%s' rejected for org '%s'. category=%s reason=%s",
+                    filename,
+                    organization_id,
+                    risk_cat,
+                    reason,
+                )
+
+                # Persist audit record in rag_guardrail_events (question_id is NULL for ingestion events)
+                try:
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO rag_guardrail_events
+                                (organization_id, question_id, event_type, payload)
+                            VALUES ($1, NULL, $2, $3::jsonb)
+                            """,
+                            organization_id,
+                            "DOCUMENT_INJECTION_BLOCKED",
+                            json.dumps({
+                                "filename": filename,
+                                "risk_category": risk_cat,
+                                "reason": reason,
+                                "content_hash": content_hash,
+                            }),
+                        )
+                except Exception as db_err:
+                    logger.warning("Could not persist DOCUMENT_INJECTION_BLOCKED event to database: %s", db_err)
+
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Document '{filename}' was rejected: Prompt injection payload detected ({risk_cat}).",
+                )
+
         # 2. Chunk the sections
         chunks = await asyncio.to_thread(
             chunk_sections,
@@ -220,30 +265,12 @@ async def upload_file(
         }
         source_type = source_type_map.get(ext, "other")
 
-        # 3. Enrich metadata (category, tags, effective_date, supersedes_label)
-        # from the first/last few text sections — footers/last pages carry
-        # effective-date and version info as often as headers do.
-        #
-        # IMPORTANT: DOCX parsing produces one section PER PARAGRAPH, not
-        # one per document region — a real metadata block (e.g. "Doc ID /
-        # Version" on one line, "Issuing Authority" on the next) can easily
-        # span 2-3 paragraphs. Taking only text_sections[-1] silently drops
-        # everything but the very last paragraph, which is exactly the bug
-        # that missed the Effective Date line in this test. Grab the last
-        # (and first) 5 sections instead of just one.
-        text_sections = [s for s in sections if s.content_type == "text"]
+        # 3. Enrich metadata
         first_text = "\n".join(s.content for s in text_sections[:5])
         last_text = "\n".join(s.content for s in text_sections[-5:])
-        full_text = "\n".join(s.content for s in text_sections)
         enrichment = await enrich_document_metadata(filename, first_text, last_text, full_text=full_text)
         logger.info(f"Enrichment for {filename}: {enrichment}")
 
-        # asyncpg requires an actual date object for a DATE column — it
-        # will NOT parse a "YYYY-MM-DD" string for you, even with an
-        # explicit ::date cast in the query. enrichment.py's own
-        # validation already confirmed the string is well-formed, so this
-        # parse is expected to succeed; the try/except is just a guard
-        # against never letting an enrichment quirk fail the whole upload.
         effective_date_obj = None
         if enrichment["effective_date"]:
             try:
@@ -251,10 +278,7 @@ async def upload_file(
             except ValueError:
                 logger.warning(f"Could not parse effective_date '{enrichment['effective_date']}' for {filename}")
 
-        # 4. Embed all chunks in batch (CPU-bound local inference, done before acquiring DB connection)
-        # Tables get natural-language context generated from columns/rows,
-        # appended to the raw table and section heading, so semantic search
-        # can find them against natural language questions.
+        # 4. Embed all chunks in batch
         logger.info(f"Embedding {len(chunks)} chunks...")
         embedding_texts = []
         for c in chunks:
@@ -266,7 +290,7 @@ async def upload_file(
 
         embeddings = await embed_batch(embedding_texts)
 
-        # 5. Register document and store chunks in a single transaction (atomic)
+        # 5. Register document and store chunks in a single transaction
         async with pool.acquire() as conn:
             async with conn.transaction():
                 doc_row = await conn.fetchrow(
@@ -302,7 +326,6 @@ async def upload_file(
                         embedding,
                     ))
 
-                # Execute a single bulk insert
                 await conn.executemany(
                     """
                     INSERT INTO rag_chunks
@@ -313,10 +336,47 @@ async def upload_file(
                     records,
                 )
 
+                # 7. Extract corporate email domains and track tenant domain identity
+                doc_domains = extract_email_domains_from_text(full_text)
+                if doc_domains:
+                    # A. Track document-domain association (cascades on document deletion)
+                    doc_domain_records = [(organization_id, document_id, d) for d in doc_domains]
+                    try:
+                        await conn.executemany(
+                            """
+                            INSERT INTO rag_document_domains
+                                (organization_id, document_id, domain)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT (document_id, domain) DO NOTHING
+                            """,
+                            doc_domain_records,
+                        )
+                    except Exception as doc_dom_err:
+                        logger.debug("rag_document_domains insert skipped: %s", doc_dom_err)
+
+                    # B. Batch upsert into rag_tenant_domains (eliminating N+1 sequential executes)
+                    tenant_domain_records = [(organization_id, d) for d in doc_domains]
+                    await conn.executemany(
+                        """
+                        INSERT INTO rag_tenant_domains
+                            (organization_id, domain, times_seen, last_seen_at)
+                        VALUES ($1, $2, 1, now())
+                        ON CONFLICT (organization_id, domain)
+                        DO UPDATE SET
+                            times_seen = rag_tenant_domains.times_seen + 1,
+                            last_seen_at = now()
+                        """,
+                        tenant_domain_records,
+                    )
+                    logger.info(
+                        "Tracked %d corporate domain(s) in batch from %s: %s",
+                        len(doc_domains),
+                        filename,
+                        doc_domains,
+                    )
+
         elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.info(
-            f"✅ Ingested {filename}: {len(chunks)} chunks in {elapsed_ms}ms"
-        )
+        logger.info(f"✅ Ingested {filename}: {len(chunks)} chunks in {elapsed_ms}ms")
 
         return {
             "document_id": document_id,
@@ -327,7 +387,6 @@ async def upload_file(
         }
 
     finally:
-        # Cleanup temp file
         try:
             os.unlink(tmp_path)
         except OSError:
@@ -361,8 +420,6 @@ async def list_documents(organization_id: str):
             "category": r["category"],
             "tags": r["tags"] or [],
             "effective_date": r["effective_date"].isoformat() if r["effective_date"] else None,
-            # Surfaced as a suggestion for the admin to act on — never
-            # auto-archives anything. See enrichment.py for why.
             "supersedes_label": r["supersedes_label"],
             "chunks_count": r["chunks_count"],
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -371,11 +428,19 @@ async def list_documents(organization_id: str):
     ]
 
 
+# ── KNOWN SECURITY GAP / ARCHITECTURE NOTE ───────────────────────────
+# /documents/{document_id}/chunks currently returns raw rag_chunks.content
+# with no sanitization at all. Anyone with the organization_id can read
+# unredacted source text regardless of prompt-level or output-level guardrails.
+# We intentionally do not silently patch this endpoint in Phase 2:
+# 1. Admin and audit inspection workflows often require verifying raw chunk storage.
+# 2. Applying context-stage or output-stage allowlisting here requires formal
+#    scoping of read-access permissions and role boundaries (e.g. tenant admin
+#    vs standard user) to avoid breaking legitimate data verification access.
+# ─────────────────────────────────────────────────────────────────────
 @app.get("/documents/{document_id}/chunks")
 async def get_document_chunks(document_id: str, organization_id: str):
-    """Get all chunks for a specific document. organization_id is required
-    and enforced — without it, any org could read any other org's chunks
-    by guessing a document_id."""
+    """Get all chunks for a specific document."""
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -406,12 +471,9 @@ async def get_document_chunks(document_id: str, organization_id: str):
     ]
 
 
-
 @app.delete("/documents/{document_id}")
 async def delete_document(document_id: str, organization_id: str):
-    """Delete a document and all its chunks (cascade). organization_id is
-    required and enforced — without it, any org could delete any other
-    org's document by guessing a document_id."""
+    """Delete a document and all its chunks (cascade)."""
     pool = get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
@@ -424,28 +486,59 @@ async def delete_document(document_id: str, organization_id: str):
     return {"status": "deleted", "document_id": document_id}
 
 
-# ── Ask (Standalone Test — no question_id required) ───────────────────
+# ── Ask Schemas (Structured Citations & Safety Events) ────────────────
+class SourceChunkMetadata(BaseModel):
+    id: str
+    document_id: str | None = None
+    heading_path: str | None = None
+    effective_date: str | None = None
+    content_type: str = "text"
+    content: str
+    combined_score: float = 0.0
+
+
 class AskTestRequest(BaseModel):
     question: str
     organization_id: str
 
 
 class AskTestResponse(BaseModel):
+    question: str
     answer: str
     confidence_score: float
     confidence_level: str
-    confidence_breakdown: dict
-    attempts: int
-    source_chunks: list[dict]
+    confidence_breakdown: dict[str, Any] = Field(default_factory=dict)
+    is_refusal: bool = False
+    attempts: int = 1
+    source_chunks: list[SourceChunkMetadata] = Field(default_factory=list)
     initial_validation_passed: bool | None = None
+    guardrail_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AskRequest(BaseModel):
+    question_id: str          # Real questions.id from Prisma
+    organization_id: str      # Required for org-scoped retrieval
+
+
+class AskResponse(BaseModel):
+    answer: str
+    confidence_score: float
+    confidence_level: str
+    confidence_breakdown: dict[str, Any] = Field(default_factory=dict)
+    is_refusal: bool = False
+    attempts: int = 1
+    source_chunk_ids: list[str] = Field(default_factory=list)
+    initial_validation_passed: bool | None = None
+    guardrail_events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ── Ask Endpoints ─────────────────────────────────────────────────────
 @app.post("/ask/test", response_model=AskTestResponse)
 async def ask_test(req: AskTestRequest):
-    """Standalone ask endpoint for testing — no question_id needed.
-    Runs the full LangGraph agent loop and returns the answer with
-    confidence scoring and source chunks."""
-    # Verify org exists
+    """Standalone ask endpoint for testing and benchmarking.
+    Runs the full LangGraph agent pipeline and returns the draft answer
+    along with confidence scoring, guardrail audit logs, and structured citation chunks.
+    """
     pool = get_pool()
     async with pool.acquire() as conn:
         org = await conn.fetchrow(
@@ -456,53 +549,45 @@ async def ask_test(req: AskTestRequest):
 
     result = await run_agent(req.question, organization_id=req.organization_id)
     chunks = result.get("chunks", [])
-    await mark_chunks_used([c.id for c in chunks])
+
+    # Mark chunks used only if retrieval executed (not blocked by input guardrail)
+    if chunks:
+        await mark_chunks_used([c.id for c in chunks])
 
     source_chunks = [
-        {
-            "id": c.id,
-            # Tables get more room so their data isn't cut off
-            "content": c.content[:2000] if c.content_type == "table" else c.content[:500],
-            "heading_path": c.heading_path,
-            "content_type": c.content_type,
-            "combined_score": round(c.combined_score, 4),
-        }
+        SourceChunkMetadata(
+            id=c.id,
+            document_id=getattr(c, "document_id", None),
+            heading_path=c.heading_path,
+            effective_date=getattr(c, "effective_date", None) or "Undated",
+            content_type=c.content_type,
+            # Provide more room for markdown tables so table columns are preserved
+            content=c.content[:2000] if c.content_type == "table" else c.content[:600],
+            combined_score=round(getattr(c, "combined_score", 0.0), 4),
+        )
         for c in chunks
     ]
 
     return AskTestResponse(
-        answer=result["draft"],
-        confidence_score=result["confidence_score"],
-        confidence_level=result["confidence_level"],
-        confidence_breakdown=result["confidence_breakdown"],
-        attempts=result["attempts"],
+        question=req.question,
+        answer=result.get("draft", ""),
+        confidence_score=result.get("confidence_score", 0.0),
+        confidence_level=result.get("confidence_level", "red"),
+        confidence_breakdown=result.get("confidence_breakdown", {}),
+        is_refusal=result.get("is_refusal", False),
+        attempts=result.get("attempts", 1),
         source_chunks=source_chunks,
-        initial_validation_passed=result.get("initial_validation_passed", True)
+        initial_validation_passed=result.get("initial_validation_passed", True),
+        guardrail_events=result.get("guardrail_events", []),
     )
 
 
-# ── Ask (Original — writes back to questions table) ───────────────────
-class AskRequest(BaseModel):
-    question_id: str          # the real questions.id from Prisma — required now,
-                               # since the answer is written back onto this row
-    organization_id: str      # required for org-scoped retrieval — never optional
-
-
-class AskResponse(BaseModel):
-    answer: str
-    confidence_score: float
-    confidence_level: str
-    confidence_breakdown: dict
-    attempts: int
-    source_chunk_ids: list[str]
-    initial_validation_passed: bool | None = None
-
 @app.post("/ask", response_model=AskResponse)
 async def ask(req: AskRequest):
-    """Runs the full agent loop for an existing question, then writes the
-    result directly onto the real `questions` row (draft_answer, confidence,
-    status) — the same row your Next.js app already reads from. No separate
-    answers table; rag_answer_attempts below is history only."""
+    """Runs the full agent pipeline for an existing RFP question row, then updates
+    the questions record (draft_answer, confidence, status, updated_at) and logs
+    history to rag_answer_attempts.
+    """
     pool = get_pool()
 
     async with pool.acquire() as conn:
@@ -515,10 +600,19 @@ async def ask(req: AskRequest):
         raise HTTPException(status_code=404, detail="Question not found for this organization")
 
     result = await run_agent(question_row["question"], organization_id=req.organization_id)
-    chunk_ids = [c.id for c in result.get("chunks", [])]
-    await mark_chunks_used(chunk_ids)
+    chunks = result.get("chunks", [])
+    chunk_ids = [c.id for c in chunks]
 
-    new_status = "IN_REVIEW" if result["confidence_level"] == "green" else "IN_PROGRESS"
+    if chunk_ids:
+        await mark_chunks_used(chunk_ids)
+
+    # Route status based on safety flags and confidence
+    if result.get("injection_detected"):
+        new_status = "FLAGGED"
+    elif result.get("confidence_level") == "green":
+        new_status = "IN_REVIEW"
+    else:
+        new_status = "IN_PROGRESS"
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -528,8 +622,8 @@ async def ask(req: AskRequest):
                 SET draft_answer = $1, confidence = $2, status = $3, updated_at = now()
                 WHERE id = $4 AND organization_id = $5
                 """,
-                result["draft"],
-                int(round(result["confidence_score"])),
+                result.get("draft", ""),
+                int(round(result.get("confidence_score", 0.0))),
                 new_status,
                 req.question_id,
                 req.organization_id,
@@ -542,21 +636,42 @@ async def ask(req: AskRequest):
                 VALUES ($1, $2, $3, $4, $5::text[], $6)
                 """,
                 req.question_id,
-                result["draft"],
-                result["confidence_score"],
-                result["confidence_level"],
+                result.get("draft", ""),
+                result.get("confidence_score", 0.0),
+                result.get("confidence_level", "red"),
                 chunk_ids,
-                result["attempts"],
+                result.get("attempts", 1),
             )
 
+            guardrail_events = result.get("guardrail_events", [])
+            if guardrail_events:
+                await conn.executemany(
+                    """
+                    INSERT INTO rag_guardrail_events
+                        (organization_id, question_id, event_type, payload)
+                    VALUES ($1, $2, $3, $4::jsonb)
+                    """,
+                    [
+                        (
+                            req.organization_id,
+                            req.question_id,
+                            ev.get("type", "UNKNOWN"),
+                            json.dumps(ev),
+                        )
+                        for ev in guardrail_events
+                    ],
+                )
+
     return AskResponse(
-        answer=result["draft"],
-        confidence_score=result["confidence_score"],
-        confidence_level=result["confidence_level"],
-        confidence_breakdown=result["confidence_breakdown"],
-        attempts=result["attempts"],
+        answer=result.get("draft", ""),
+        confidence_score=result.get("confidence_score", 0.0),
+        confidence_level=result.get("confidence_level", "red"),
+        confidence_breakdown=result.get("confidence_breakdown", {}),
+        is_refusal=result.get("is_refusal", False),
+        attempts=result.get("attempts", 1),
         source_chunk_ids=chunk_ids,
-        initial_validation_passed=result.get("initial_validation_passed", True)
+        initial_validation_passed=result.get("initial_validation_passed", True),
+        guardrail_events=result.get("guardrail_events", []),
     )
 
 
@@ -572,16 +687,11 @@ class IngestChunkRequest(BaseModel):
 
 @app.post("/ingest/chunk")
 async def ingest_chunk(req: IngestChunkRequest):
-    """Embeds and stores a single pre-chunked piece of text into the RAG
-    knowledge base (rag_chunks) — separate from `questionnaires`, which is
-    the incoming RFP being answered, not the source material the agent
-    retrieves from."""
+    """Embeds and stores a single pre-chunked piece of text into the RAG knowledge base."""
     embedding = await embed(req.content)
     metadata_json = json.dumps(req.metadata)
     pool = get_pool()
     async with pool.acquire() as conn:
-        # Confirm the document exists and belongs to this org before
-        # attaching a chunk to it — cheap check, prevents cross-org writes.
         doc = await conn.fetchrow(
             "SELECT id FROM rag_documents WHERE id = $1 AND organization_id = $2",
             req.document_id,
@@ -618,9 +728,7 @@ class CreateDocumentRequest(BaseModel):
 
 @app.post("/ingest/document")
 async def create_document(req: CreateDocumentRequest):
-    """Registers a source document before its chunks are ingested. Call
-    this once per uploaded policy/past-answer file, then /ingest/chunk
-    for each chunk produced from it."""
+    """Registers a source document before its chunks are ingested."""
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(

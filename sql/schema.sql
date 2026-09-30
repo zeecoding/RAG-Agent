@@ -79,3 +79,55 @@ CREATE TABLE IF NOT EXISTS rag_answer_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rag_answer_attempts_question ON rag_answer_attempts(question_id);
+
+-- ---------------------------------------------------------------------
+-- rag_guardrail_events: Audit log for security & compliance guardrail
+-- events (PII redactions, prompt injections, document poisoning).
+-- question_id is nullable because ingestion-stage events (e.g. document
+-- upload rejections) have no associated question.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rag_guardrail_events (
+    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    question_id     TEXT REFERENCES questions(id) ON DELETE CASCADE,
+    event_type      TEXT NOT NULL,
+    payload         JSONB DEFAULT '{}'::jsonb,
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_guardrail_events_org_type_time
+    ON rag_guardrail_events(organization_id, event_type, created_at DESC);
+
+-- ---------------------------------------------------------------------
+-- rag_tenant_domains: Inferred corporate email domains per tenant organization.
+-- Populated during document ingestion by extracting email domains from
+-- uploaded text. A domain is considered tenant-verified once seen across
+-- 2+ separate documents (times_seen >= 2).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rag_tenant_domains (
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    domain          TEXT NOT NULL,
+    times_seen      INT DEFAULT 1,
+    last_seen_at    TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (organization_id, domain)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_tenant_domains_org_verified
+    ON rag_tenant_domains(organization_id, domain) WHERE times_seen >= 2;
+
+-- ---------------------------------------------------------------------
+-- rag_document_domains: Document-to-domain mapping with ON DELETE CASCADE.
+-- Prevents counter drift when documents are deleted or re-uploaded.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rag_document_domains (
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    document_id     TEXT NOT NULL REFERENCES rag_documents(id) ON DELETE CASCADE,
+    domain          TEXT NOT NULL,
+    PRIMARY KEY (document_id, domain)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_document_domains_org_domain
+    ON rag_document_domains(organization_id, domain);
+
+
+
