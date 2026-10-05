@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 50
     allowed_extensions: str = ".pdf,.docx,.xlsx,.csv,.txt,.md"
 
+    # Supabase (Auth & Object Storage)
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    supabase_jwt_secret: str = ""
+    supabase_storage_bucket: str = "questionnaires"
+
     class Config:
         env_file = ".env"
         extra = "ignore"

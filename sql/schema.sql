@@ -129,5 +129,69 @@ CREATE TABLE IF NOT EXISTS rag_document_domains (
 CREATE INDEX IF NOT EXISTS idx_rag_document_domains_org_domain
     ON rag_document_domains(organization_id, domain);
 
+-- ---------------------------------------------------------------------
+-- questionnaires & coordinate tracking: Format-preserving questionnaire
+-- exporter integration. Additive alterations to existing Prisma schema.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS questionnaires (
+    id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    title           TEXT NOT NULL,
+    filename        TEXT NOT NULL,
+    storage_path    TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'IN_PROGRESS',
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at      TIMESTAMPTZ DEFAULT now()
+);
 
+-- Add missing columns to questionnaires if table was created by Prisma
+ALTER TABLE questionnaires ADD COLUMN IF NOT EXISTS organization_id TEXT REFERENCES organizations(id) ON DELETE CASCADE;
+ALTER TABLE questionnaires ADD COLUMN IF NOT EXISTS title TEXT;
+ALTER TABLE questionnaires ADD COLUMN IF NOT EXISTS filename TEXT;
+ALTER TABLE questionnaires ADD COLUMN IF NOT EXISTS storage_path TEXT;
 
+-- Relax Prisma not-null constraints for standalone questionnaire imports
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'questionnaires' AND column_name = 'project_id' AND is_nullable = 'NO') THEN
+        ALTER TABLE questionnaires ALTER COLUMN project_id DROP NOT NULL;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'questionnaires' AND column_name = 'file_name' AND is_nullable = 'NO') THEN
+        ALTER TABLE questionnaires ALTER COLUMN file_name DROP NOT NULL;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'questionnaires' AND column_name = 'file_url' AND is_nullable = 'NO') THEN
+        ALTER TABLE questionnaires ALTER COLUMN file_url DROP NOT NULL;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'questionnaires' AND column_name = 'file_size' AND is_nullable = 'NO') THEN
+        ALTER TABLE questionnaires ALTER COLUMN file_size DROP NOT NULL;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'questionnaires' AND column_name = 'file_type' AND is_nullable = 'NO') THEN
+        ALTER TABLE questionnaires ALTER COLUMN file_type DROP NOT NULL;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'questionnaires' AND column_name = 'question_count' AND is_nullable = 'NO') THEN
+        ALTER TABLE questionnaires ALTER COLUMN question_count DROP NOT NULL;
+    END IF;
+END $$;
+
+-- Ensure questions table has coordinate tracking
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS coordinates JSONB;
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS questionnaire_id TEXT REFERENCES questionnaires(id) ON DELETE CASCADE;
+
+-- Ensure enums include required statuses (safe no-op if enum or value already exists)
+DO $$
+BEGIN
+    BEGIN
+        ALTER TYPE "QuestionStatus" ADD VALUE IF NOT EXISTS 'DRAFT';
+    EXCEPTION WHEN undefined_object THEN NULL;
+    END;
+    BEGIN
+        ALTER TYPE "QuestionnaireStatus" ADD VALUE IF NOT EXISTS 'IN_PROGRESS';
+    EXCEPTION WHEN undefined_object THEN NULL;
+    END;
+END $$;
+
+ALTER TABLE questionnaires ALTER COLUMN updated_at SET DEFAULT now();
+ALTER TABLE questions ALTER COLUMN updated_at SET DEFAULT now();
+
+CREATE INDEX IF NOT EXISTS idx_questionnaires_org ON questionnaires(organization_id);
+CREATE INDEX IF NOT EXISTS idx_questions_questionnaire ON questions(questionnaire_id);

@@ -9,12 +9,15 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.agent.graph import run_agent
+from app.api.questionnaires import router as questionnaires_router
+from app.auth.dependencies import AuthenticatedUser, require_responder_or_admin
 from app.config import settings
 from app.db.pool import close_pool, get_pool, init_pool
 from app.rag.chunker import chunk_sections
@@ -53,11 +56,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(questionnaires_router)
+
 
 # ── Health ────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Auth Endpoints ───────────────────────────────────────────────────
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/auth/login")
+async def login(req: LoginRequest):
+    """Authenticate directly with Supabase Auth and return session bearer token."""
+    if not settings.supabase_url:
+        raise HTTPException(status_code=500, detail="SUPABASE_URL is not configured.")
+
+    token_url = f"{settings.supabase_url.rstrip('/')}/auth/v1/token?grant_type=password"
+    headers = {
+        "apikey": settings.supabase_service_role_key or "",
+        "Content-Type": "application/json",
+    }
+    payload = {"email": req.email, "password": req.password}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.post(token_url, headers=headers, json=payload)
+    except httpx.RequestError as exc:
+        logger.error("Supabase Auth connection error: %s", exc)
+        raise HTTPException(status_code=503, detail="Unable to connect to authentication server.")
+
+    if res.status_code != 200:
+        error_detail = "Invalid login credentials."
+        try:
+            err_json = res.json()
+            error_detail = err_json.get("error_description") or err_json.get("msg") or res.text
+        except Exception:
+            pass
+        raise HTTPException(status_code=res.status_code, detail=error_detail)
+
+    data = res.json()
+    return {
+        "access_token": data.get("access_token"),
+        "user": data.get("user"),
+    }
+
+
+@app.get("/auth/me", response_model=AuthenticatedUser)
+async def get_me(user: AuthenticatedUser = Depends(require_responder_or_admin)):
+    """Return verified user profile and organization role."""
+    return user
 
 
 # ── Upload UI ─────────────────────────────────────────────────────────
@@ -70,6 +123,16 @@ async def upload_ui():
     html_path = os.path.join(STATIC_DIR, "index.html")
     if not os.path.exists(html_path):
         raise HTTPException(status_code=404, detail="Upload UI not found")
+    with open(html_path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/questionnaires-ui", response_class=HTMLResponse)
+async def questionnaires_ui():
+    """Serve the DOCX questionnaire export and testing interface."""
+    html_path = os.path.join(STATIC_DIR, "questionnaire_ui.html")
+    if not os.path.exists(html_path):
+        raise HTTPException(status_code=404, detail="Questionnaire UI not found")
     with open(html_path, "r", encoding="utf-8") as f:
         return HTMLResponse(content=f.read())
 

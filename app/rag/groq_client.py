@@ -50,6 +50,25 @@ def _prepare_schema_for_groq(schema: dict) -> dict:
     return schema
 
 
+def _extract_retry_delay(response: httpx.Response, fallback_delay: float) -> float:
+    """Extract retry delay from headers or response text if available."""
+    retry_header = response.headers.get("retry-after")
+    if retry_header:
+        try:
+            return max(float(retry_header), 1.0)
+        except ValueError:
+            pass
+    # Groq error messages often state: "Please try again in 4.23s"
+    try:
+        import re
+        match = re.search(r"try again in ([\d\.]+)s", response.text)
+        if match:
+            return max(float(match.group(1)) + 0.5, 1.0)
+    except Exception:
+        pass
+    return fallback_delay
+
+
 class GroqClient:
     def __init__(self):
         # httpx.AsyncClient is NOT created here — it must be created inside
@@ -74,8 +93,8 @@ class GroqClient:
 
     async def chat(self, system: str, user: str, model: str, temperature: float = 0.2) -> str:
         http = self._ensure_http()
-        backoffs = [1, 2, 4]
-        for attempt in range(4):
+        backoffs = [2.0, 5.0, 10.0, 20.0]
+        for attempt in range(len(backoffs) + 1):
             try:
                 resp = await http.post(
                     "/chat/completions",
@@ -92,17 +111,25 @@ class GroqClient:
                 return resp.json()["choices"][0]["message"]["content"]
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
-                if status == 429 or status >= 500:
-                    if attempt < 3:
-                        logger.warning(f"Groq API error ({status}). Retrying in {backoffs[attempt]}s...")
-                        await asyncio.sleep(backoffs[attempt])
-                        continue
+                if (status == 429 or status >= 500) and attempt < len(backoffs):
+                    delay = _extract_retry_delay(e.response, backoffs[attempt])
+                    logger.warning(
+                        "Groq API %s (%d). Backing off for %.2fs before retry (attempt %d/%d)...",
+                        "rate limit" if status == 429 else "server error",
+                        status,
+                        delay,
+                        attempt + 1,
+                        len(backoffs),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 logger.error(f"Groq API HTTP error {status}: {e.response.text}")
                 raise RuntimeError(f"Groq API HTTP error {status}: {e.response.text}") from e
             except httpx.RequestError as e:
-                if attempt < 3:
-                    logger.warning(f"Groq API request error: {e}. Retrying in {backoffs[attempt]}s...")
-                    await asyncio.sleep(backoffs[attempt])
+                if attempt < len(backoffs):
+                    delay = backoffs[attempt]
+                    logger.warning(f"Groq API request error: {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
                     continue
                 logger.error(f"Groq API request failed: {e}")
                 raise RuntimeError(f"Groq API request failed: {e}") from e
@@ -125,8 +152,8 @@ class GroqClient:
         # the 'title' fields that Pydantic's model_json_schema() adds.
         schema = _prepare_schema_for_groq(schema)
         http = self._ensure_http()
-        backoffs = [1, 2, 4]
-        for attempt in range(4):
+        backoffs = [2.0, 5.0, 10.0, 20.0]
+        for attempt in range(len(backoffs) + 1):
             try:
                 resp = await http.post(
                     "/chat/completions",
@@ -159,17 +186,25 @@ class GroqClient:
                     )
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
-                if status == 429 or status >= 500:
-                    if attempt < 3:
-                        logger.warning(f"Groq API error ({status}). Retrying in {backoffs[attempt]}s...")
-                        await asyncio.sleep(backoffs[attempt])
-                        continue
+                if (status == 429 or status >= 500) and attempt < len(backoffs):
+                    delay = _extract_retry_delay(e.response, backoffs[attempt])
+                    logger.warning(
+                        "Groq API %s (%d). Backing off for %.2fs before retry (attempt %d/%d)...",
+                        "rate limit" if status == 429 else "server error",
+                        status,
+                        delay,
+                        attempt + 1,
+                        len(backoffs),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 logger.error(f"Groq API HTTP error {status}: {e.response.text}")
                 raise RuntimeError(f"Groq API HTTP error {status}: {e.response.text}") from e
             except httpx.RequestError as e:
-                if attempt < 3:
-                    logger.warning(f"Groq API request error: {e}. Retrying in {backoffs[attempt]}s...")
-                    await asyncio.sleep(backoffs[attempt])
+                if attempt < len(backoffs):
+                    delay = backoffs[attempt]
+                    logger.warning(f"Groq API request error: {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
                     continue
                 logger.error(f"Groq API request failed: {e}")
                 raise RuntimeError(f"Groq API request failed: {e}") from e

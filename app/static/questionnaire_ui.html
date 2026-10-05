@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-950 text-slate-100">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DOCX Exporter & Questionnaire Console — RFP Compliance Core</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    code, pre { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body class="h-full flex flex-col antialiased selection:bg-indigo-500 selection:text-white">
+
+  <!-- Top Navigation Header -->
+  <header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <div class="flex items-center space-x-3">
+        <div class="h-9 w-9 rounded-lg bg-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
+          DOCX
+        </div>
+        <div>
+          <h1 class="font-bold text-slate-100 text-sm sm:text-base leading-tight">Word Format-Preserving Exporter</h1>
+          <p class="text-xs text-slate-400">Phase 3 — OpenXML Mutation & Ingestion Console</p>
+        </div>
+      </div>
+
+      <!-- Auth State / Profile Badge -->
+      <div class="flex items-center space-x-3">
+        <div id="authStatusIndicator" class="flex items-center space-x-2 text-xs">
+          <span class="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse"></span>
+          <span class="text-slate-400" id="authStatusText">Not Authenticated</span>
+        </div>
+        <button id="authBtn" onclick="toggleAuthModal()" class="px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition shadow-sm">
+          Sign In
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Layout -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+    <!-- Active User & Tenant Info Bar (Hidden when logged out) -->
+    <div id="tenantBar" class="hidden bg-slate-900/80 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center space-x-4">
+        <div class="h-10 w-10 rounded-full bg-slate-800 flex items-center justify-center font-semibold text-indigo-400 border border-slate-700" id="userAvatarText">
+          U
+        </div>
+        <div>
+          <div class="flex items-center space-x-2">
+            <span class="font-medium text-sm text-slate-200" id="userEmailText">user@example.com</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" id="userRoleBadge">
+              RESPONDER
+            </span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Organization ID: <code class="text-indigo-300 font-mono text-[11px]" id="userOrgText">cmp30euzm000228wd5fey2qo2</code>
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center space-x-2">
+        <button onclick="signOut()" class="text-xs text-rose-400 hover:text-rose-300 px-3 py-1.5 rounded border border-rose-500/20 hover:bg-rose-500/10 transition">
+          Disconnect
+        </button>
+      </div>
+    </div>
+
+    <!-- Upload & Ingestion Section -->
+    <section class="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-6 sm:p-8 backdrop-blur">
+      <div class="max-w-2xl">
+        <h2 class="text-lg font-semibold text-slate-100">Upload RFP / Questionnaire Document</h2>
+        <p class="text-sm text-slate-400 mt-1">
+          Upload any customer or audit <code class="text-slate-300">.docx</code> questionnaire. The engine surgically inspects table cells, detects question & response columns, stores write-back coordinates, and archives the template in Supabase Storage.
+        </p>
+      </div>
+
+      <form id="uploadForm" onsubmit="handleUpload(event)" class="mt-6 space-y-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-medium text-slate-300 mb-1">Questionnaire Title</label>
+            <input type="text" id="docTitle" placeholder="e.g. Acme Corp Vendor Security Review 2026" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-500">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-300 mb-1">Organization ID</label>
+            <input type="text" id="targetOrgId" value="cmp30euzm000228wd5fey2qo2" class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-200 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500">
+          </div>
+        </div>
+
+        <!-- Drag & Drop Dropzone -->
+        <div id="dropZone" class="border-2 border-dashed border-slate-800 hover:border-indigo-500/50 rounded-xl p-8 text-center transition cursor-pointer bg-slate-950/40" onclick="document.getElementById('fileInput').click()">
+          <input type="file" id="fileInput" accept=".docx" class="hidden" onchange="handleFileSelected(event)">
+          <div class="space-y-2">
+            <svg class="mx-auto h-10 w-10 text-slate-500" stroke="currentColor" fill="none" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+            <div class="text-sm text-slate-300">
+              <span class="font-semibold text-indigo-400 hover:text-indigo-300">Click to select .docx file</span> or drag & drop here
+            </div>
+            <p class="text-xs text-slate-500" id="selectedFileName">Word documents (.docx) up to 50MB</p>
+          </div>
+        </div>
+
+        <div class="flex justify-end">
+          <button type="submit" id="uploadSubmitBtn" class="px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 font-medium text-sm text-white transition flex items-center space-x-2 shadow-lg shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed">
+            <span>Parse & Upload Template</span>
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Active Questionnaire Workspace (Hidden until file parsed) -->
+    <section id="workspaceSection" class="hidden space-y-6">
+      <!-- Questionnaire Header Summary Card -->
+      <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-6 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <div class="flex items-center space-x-3">
+            <h3 class="text-base font-bold text-slate-100" id="wsTitle">Questionnaire Title</h3>
+            <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20" id="wsStatus">
+              IN_PROGRESS
+            </span>
+          </div>
+          <div class="flex items-center space-x-4 text-xs text-slate-400 mt-1">
+            <span>File: <code class="text-slate-300" id="wsFilename">template.docx</code></span>
+            <span>Questions: <b class="text-slate-200" id="wsCount">0</b></span>
+            <span>Storage: <code class="text-slate-400 text-[11px]" id="wsStoragePath">questionnaires/...</code></span>
+          </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="flex items-center space-x-3">
+          <button id="answerAllBtn" onclick="triggerAnswerAll()" class="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-xs font-semibold text-white transition flex items-center space-x-2 shadow-md shadow-purple-600/20">
+            <span>✨ Generate AI Answers</span>
+          </button>
+
+          <button id="exportBtn" onclick="triggerExport()" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white transition flex items-center space-x-2 shadow-md shadow-emerald-600/20">
+            <span>⬇ Export Completed .docx</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Questions & Coordinates Table -->
+      <div class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+          <h4 class="text-sm font-semibold text-slate-200">Extracted Controls & Target Coordinates</h4>
+          <span class="text-xs text-slate-400" id="tableStatusSummary">Showing 0 controls</span>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs text-slate-300">
+            <thead class="bg-slate-950/80 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
+              <tr>
+                <th class="px-4 py-3 w-12 text-center">#</th>
+                <th class="px-4 py-3 w-72">Requirement / Question</th>
+                <th class="px-4 py-3 w-48">Coordinate Target</th>
+                <th class="px-4 py-3">Draft Answer</th>
+                <th class="px-4 py-3 w-24 text-center">Confidence</th>
+                <th class="px-4 py-3 w-24 text-center">Status</th>
+                <th class="px-4 py-3 w-28 text-center">Action</th>
+              </tr>
+            </thead>
+            <tbody id="questionsTableBody" class="divide-y divide-slate-800/60 font-normal">
+              <tr>
+                <td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">
+                  Upload a questionnaire above to inspect extracted coordinates and controls.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Supabase Auth Modal -->
+  <div id="authModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+        <h3 class="text-sm font-bold text-slate-100 flex items-center space-x-2">
+          <svg class="h-4 w-4 text-emerald-400" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M21.362 9.354H12V.646a.646.646 0 0 0-1.16-.388L2.096 12.632a.646.646 0 0 0 .504 1.014H12v8.708a.646.646 0 0 0 1.16.388l8.744-12.374a.646.646 0 0 0-.542-1.014z" />
+          </svg>
+          <span>Supabase Authentication</span>
+        </h3>
+        <button onclick="toggleAuthModal()" class="text-slate-400 hover:text-slate-200 text-sm">✕</button>
+      </div>
+
+      <div class="space-y-4">
+        <!-- 1. Real Supabase Login with Email & Password -->
+        <div>
+          <label class="block text-xs font-semibold text-slate-200 mb-2">Sign In with Supabase Account</label>
+          <div id="loginErrorMsg" class="hidden mb-2 p-2 rounded bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs"></div>
+          <form onsubmit="handlePasswordLogin(event)" class="space-y-2.5">
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">Email</label>
+              <input type="email" id="loginEmail" placeholder="aliakber2010awan14july@gmail.com" required
+                class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500 placeholder-slate-600" />
+            </div>
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">Password</label>
+              <input type="password" id="loginPassword" placeholder="••••••••" required
+                class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500 placeholder-slate-600" />
+            </div>
+            <button type="submit" id="loginSubmitBtn" class="w-full py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-semibold text-xs text-white transition shadow-md shadow-emerald-600/20 flex items-center justify-center space-x-1">
+              <span>Sign In with Supabase</span>
+            </button>
+          </form>
+        </div>
+
+        <div class="relative flex py-1 items-center">
+          <div class="flex-grow border-t border-slate-800"></div>
+          <span class="flex-shrink mx-2 text-[10px] text-slate-500 uppercase tracking-widest">or quick test persona</span>
+          <div class="flex-grow border-t border-slate-800"></div>
+        </div>
+
+        <!-- 2. Quick Preset Personas from Neon Database -->
+        <div>
+          <label class="block text-xs font-medium text-slate-300 mb-1.5">Preset Personas (Offline / Development)</label>
+          <div class="grid grid-cols-1 gap-1.5">
+            <button type="button" onclick="selectPersona('3e6f5f2b-562a-433d-9085-4459cf2153ed', 'aliakber2010awan14july@gmail.com', 'RESPONDER')" class="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/50 text-left transition group">
+              <div>
+                <span class="block text-xs font-semibold text-slate-200 group-hover:text-emerald-400">Ali Akber (Responder)</span>
+                <span class="block text-[10px] text-slate-400">aliakber2010awan14july@gmail.com</span>
+              </div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">ALLOWED</span>
+            </button>
+
+            <button type="button" onclick="selectPersona('2cac8c63-e496-4809-bb13-e502c3812c88', 'zubairwah682@gmail.com', 'ADMIN')" class="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/50 text-left transition group">
+              <div>
+                <span class="block text-xs font-semibold text-slate-200 group-hover:text-indigo-400">Zubair (Admin)</span>
+                <span class="block text-[10px] text-slate-400">zubairwah682@gmail.com</span>
+              </div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">ALLOWED</span>
+            </button>
+
+            <button type="button" onclick="selectPersona('b8d429ce-7fee-4b5d-a972-9f36fb4cc66a', 'junaidjd656@gmail.com', 'TEAM_MEMBER')" class="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 hover:border-rose-500/50 text-left transition group">
+              <div>
+                <span class="block text-xs font-semibold text-slate-200 group-hover:text-rose-400">Junaid (Team Member)</span>
+                <span class="block text-[10px] text-slate-400">junaidjd656@gmail.com</span>
+              </div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">403 REJECT</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="relative flex py-1 items-center">
+          <div class="flex-grow border-t border-slate-800"></div>
+          <span class="flex-shrink mx-2 text-[10px] text-slate-500 uppercase tracking-widest">or direct bearer token</span>
+          <div class="flex-grow border-t border-slate-800"></div>
+        </div>
+
+        <!-- 3. Direct Token Paste -->
+        <div>
+          <label class="block text-xs font-medium text-slate-300 mb-1">Paste Supabase JWT Token</label>
+          <textarea id="directToken" rows="2" placeholder="eyJhbGciOi..." class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-[11px] font-mono text-slate-300 focus:outline-none focus:ring-1 focus:ring-indigo-500"></textarea>
+          <div class="flex justify-end mt-1.5">
+            <button type="button" onclick="handleDirectToken()" class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-200">
+              Apply Token
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end pt-2 border-t border-slate-800">
+        <button onclick="toggleAuthModal()" class="px-3 py-1.5 rounded-lg border border-slate-800 text-xs text-slate-400 hover:bg-slate-800">
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // State
+    let authToken = localStorage.getItem("rfp_auth_token") || "";
+    let currentQuestionnaire = null;
+    let currentUser = null;
+
+    // Clean up any stale or corrupted tokens from previous tests
+    if (authToken && (authToken.endsWith(".dev") || authToken.includes("="))) {
+      authToken = "";
+      localStorage.removeItem("rfp_auth_token");
+    }
+
+    function toggleAuthModal() {
+      const modal = document.getElementById("authModal");
+      modal.classList.toggle("hidden");
+    }
+
+    async function handlePasswordLogin(event) {
+      event.preventDefault();
+      const errBox = document.getElementById("loginErrorMsg");
+      errBox.classList.add("hidden");
+      const btn = document.getElementById("loginSubmitBtn");
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin inline-block mr-1">⟳</span> Signing In...`;
+
+      const email = document.getElementById("loginEmail").value.trim();
+      const password = document.getElementById("loginPassword").value;
+
+      try {
+        const res = await fetch("/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || "Authentication failed");
+        }
+        await verifyAndSetToken(data.access_token);
+        toggleAuthModal();
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<span>Sign In with Supabase</span>`;
+      }
+    }
+
+    async function handleDirectToken() {
+      const direct = document.getElementById("directToken").value.trim();
+      if (!direct) return;
+      try {
+        await verifyAndSetToken(direct);
+        toggleAuthModal();
+      } catch (err) {
+        alert("Token error: " + err.message);
+      }
+    }
+
+    function createSyntheticJwt(payload) {
+      const header = { alg: "HS256", typ: "JWT" };
+      function toBase64Url(obj) {
+        const str = JSON.stringify(obj);
+        const b64 = btoa(unescape(encodeURIComponent(str)));
+        return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      }
+      return `${toBase64Url(header)}.${toBase64Url(payload)}.synthetic_sig`;
+    }
+
+    function selectPersona(sub, email, role) {
+      const token = createSyntheticJwt({ sub: sub, email: email, aud: "authenticated" });
+      setToken(token, email, role);
+      toggleAuthModal();
+    }
+
+    async function verifyAndSetToken(token) {
+      const orgId = document.getElementById("targetOrgId").value.trim();
+      const res = await fetch("/auth/me", {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "X-Organization-Id": orgId
+        }
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Authorization verification failed");
+      }
+      const user = await res.json();
+      setToken(token, user.email, user.role);
+    }
+
+    function setToken(token, email, role) {
+      authToken = token;
+      localStorage.setItem("rfp_auth_token", token);
+      currentUser = { email, role };
+
+      document.getElementById("authStatusIndicator").innerHTML = `
+        <span class="inline-block h-2 w-2 rounded-full bg-emerald-400"></span>
+        <span class="text-emerald-400 font-medium">Authenticated</span>
+      `;
+      document.getElementById("authBtn").textContent = "Signed In";
+      document.getElementById("tenantBar").classList.remove("hidden");
+      document.getElementById("userEmailText").textContent = email;
+      document.getElementById("userRoleBadge").textContent = role;
+      document.getElementById("userAvatarText").textContent = email.charAt(0).toUpperCase();
+    }
+
+    function signOut() {
+      authToken = "";
+      localStorage.removeItem("rfp_auth_token");
+      currentUser = null;
+      document.getElementById("tenantBar").classList.add("hidden");
+      document.getElementById("authStatusIndicator").innerHTML = `
+        <span class="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse"></span>
+        <span class="text-slate-400">Not Authenticated</span>
+      `;
+      document.getElementById("authBtn").textContent = "Sign In";
+    }
+
+    function handleFileSelected(event) {
+      const file = event.target.files[0];
+      if (file) {
+        document.getElementById("selectedFileName").textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+        if (!document.getElementById("docTitle").value) {
+          document.getElementById("docTitle").value = file.name.replace(/\.[^/.]+$/, "");
+        }
+      }
+    }
+
+    async function handleUpload(event) {
+      event.preventDefault();
+      const fileInput = document.getElementById("fileInput");
+      if (!fileInput.files || fileInput.files.length === 0) {
+        alert("Please select a .docx questionnaire file to upload.");
+        return;
+      }
+
+      if (!authToken) {
+        alert("Please sign in with your Supabase account or choose a persona before uploading.");
+        toggleAuthModal();
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append("file", fileInput.files[0]);
+      formData.append("title", document.getElementById("docTitle").value);
+
+      const orgId = document.getElementById("targetOrgId").value.trim();
+      const btn = document.getElementById("uploadSubmitBtn");
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin inline-block mr-2">⟳</span> Uploading & Parsing...`;
+
+      try {
+        const res = await fetch("/questionnaires/upload", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${authToken}`,
+            "X-Organization-Id": orgId,
+          },
+          body: formData,
+        });
+
+        if (!res.ok) {
+          let errMsg = `Upload failed (${res.status})`;
+          try {
+            const err = await res.json();
+            errMsg = err.detail || errMsg;
+          } catch {
+            const txt = await res.text();
+            if (txt) errMsg = txt;
+          }
+          throw new Error(errMsg);
+        }
+
+        const data = await res.json();
+        renderWorkspace(data);
+      } catch (err) {
+        alert("Upload error: " + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<span>Parse & Upload Template</span>`;
+      }
+    }
+
+    function renderWorkspace(data) {
+      currentQuestionnaire = data;
+      document.getElementById("workspaceSection").classList.remove("hidden");
+      document.getElementById("wsTitle").textContent = data.title;
+      document.getElementById("wsStatus").textContent = data.status;
+      document.getElementById("wsFilename").textContent = data.filename;
+      document.getElementById("wsCount").textContent = data.question_count;
+      document.getElementById("wsStoragePath").textContent = data.storage_path;
+
+      const tbody = document.getElementById("questionsTableBody");
+      tbody.innerHTML = "";
+
+      if (!data.questions || data.questions.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">No questions found.</td></tr>`;
+        return;
+      }
+
+      data.questions.forEach((q, idx) => {
+        const coordDesc = q.coordinates.target_type === "table_cell"
+          ? `<span class="font-mono text-indigo-400">Table ${q.coordinates.table_idx}, Row ${q.coordinates.row_idx}, Col ${q.coordinates.target_col_idx}</span>`
+          : `<span class="font-mono text-purple-400">Paragraph ${q.coordinates.paragraph_idx}</span>`;
+
+        const tr = document.createElement("tr");
+        tr.id = `row-question-${q.id}`;
+        tr.className = "hover:bg-slate-800/30 transition";
+        tr.innerHTML = `
+          <td class="px-4 py-3 text-center text-slate-500 font-mono">${idx + 1}</td>
+          <td class="px-4 py-3 font-medium text-slate-200">${q.question}</td>
+          <td class="px-4 py-3 text-[11px]">${coordDesc}</td>
+          <td class="px-4 py-3 text-slate-300 italic" id="ans-text-${q.id}">${q.draft_answer ? q.draft_answer : '<span class="text-slate-600">[Awaiting AI Draft]</span>'}</td>
+          <td class="px-4 py-3 text-center" id="ans-conf-${q.id}">
+            ${q.confidence ? `<span class="px-2 py-0.5 rounded font-mono font-semibold ${q.confidence > 70 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}">${q.confidence}%</span>` : '<span class="text-slate-600">—</span>'}
+          </td>
+          <td class="px-4 py-3 text-center" id="ans-status-${q.id}">
+            <span class="px-2 py-0.5 rounded text-[10px] font-semibold ${q.status === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400'}">${q.status}</span>
+          </td>
+          <td class="px-4 py-3 text-center">
+            <button
+              type="button"
+              id="btn-ans-${q.id}"
+              onclick="triggerAnswerQuestion('${q.id}')"
+              class="question-action-btn px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-medium text-[11px] transition shadow-sm inline-flex items-center space-x-1 disabled:opacity-50 disabled:cursor-not-allowed">
+              <span>${q.draft_answer ? '↺ Re-answer' : '✨ Answer'}</span>
+            </button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      document.getElementById("tableStatusSummary").textContent = `Showing ${data.questions.length} controls`;
+      window.scrollTo({ top: document.getElementById("workspaceSection").offsetTop - 100, behavior: 'smooth' });
+    }
+
+    async function triggerAnswerQuestion(questionId) {
+      if (!currentQuestionnaire) return;
+      const btn = document.getElementById(`btn-ans-${questionId}`);
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = `<span class="animate-spin inline-block mr-1">⟳</span> Answering...`;
+      }
+
+      const orgId = document.getElementById("targetOrgId").value.trim();
+
+      try {
+        const res = await fetch(`/questionnaires/${currentQuestionnaire.questionnaire_id}/questions/${questionId}/answer`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${authToken}`,
+            "X-Organization-Id": orgId,
+          }
+        });
+
+        if (!res.ok) {
+          let errMsg = `Failed to generate answer (${res.status})`;
+          try {
+            const err = await res.json();
+            errMsg = err.detail || errMsg;
+          } catch {
+            const txt = await res.text();
+            if (txt) errMsg = txt;
+          }
+          throw new Error(errMsg);
+        }
+
+        const updatedQ = await res.json();
+
+        // Update active questionnaire state
+        const targetQ = currentQuestionnaire.questions.find(q => q.id === questionId);
+        if (targetQ) {
+          targetQ.draft_answer = updatedQ.draft_answer;
+          targetQ.confidence = updatedQ.confidence;
+          targetQ.status = updatedQ.status;
+        }
+
+        // Update DOM elements directly for snappy feedback
+        const ansCell = document.getElementById(`ans-text-${questionId}`);
+        if (ansCell) ansCell.innerHTML = updatedQ.draft_answer || '<span class="text-slate-600">[Awaiting AI Draft]</span>';
+
+        const confCell = document.getElementById(`ans-conf-${questionId}`);
+        if (confCell) {
+          confCell.innerHTML = updatedQ.confidence
+            ? `<span class="px-2 py-0.5 rounded font-mono font-semibold ${updatedQ.confidence > 70 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}">${updatedQ.confidence}%</span>`
+            : '<span class="text-slate-600">—</span>';
+        }
+
+        const statusCell = document.getElementById(`ans-status-${questionId}`);
+        if (statusCell) {
+          statusCell.innerHTML = `<span class="px-2 py-0.5 rounded text-[10px] font-semibold ${updatedQ.status === 'APPROVED' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-400'}">${updatedQ.status}</span>`;
+        }
+
+        if (btn) {
+          btn.innerHTML = `<span>↺ Re-answer</span>`;
+        }
+      } catch (err) {
+        alert("Answer error: " + err.message);
+        if (btn) {
+          btn.innerHTML = `<span>✨ Answer</span>`;
+        }
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function triggerAnswerAll() {
+      if (!currentQuestionnaire) return;
+      const btn = document.getElementById("answerAllBtn");
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin inline-block mr-1">⟳</span> Queued & Answering (Paced)...`;
+
+      // Disable individual row buttons while bulk run is active
+      document.querySelectorAll(".question-action-btn").forEach(b => b.disabled = true);
+
+      const orgId = document.getElementById("targetOrgId").value.trim();
+
+      try {
+        const res = await fetch(`/questionnaires/${currentQuestionnaire.questionnaire_id}/answer-all`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${authToken}`,
+            "X-Organization-Id": orgId,
+          }
+        });
+
+        if (!res.ok) {
+          let errMsg = `Failed to generate answers (${res.status})`;
+          try {
+            const err = await res.json();
+            errMsg = err.detail || errMsg;
+          } catch {
+            const txt = await res.text();
+            if (txt) errMsg = txt;
+          }
+          throw new Error(errMsg);
+        }
+
+        // Refresh questionnaire view
+        const getRes = await fetch(`/questionnaires/${currentQuestionnaire.questionnaire_id}`, {
+          headers: {
+            "Authorization": `Bearer ${authToken}`,
+            "X-Organization-Id": orgId,
+          }
+        });
+        const updated = await getRes.json();
+        renderWorkspace(updated);
+        alert(`Successfully generated AI answers for ${updated.question_count} questions!`);
+      } catch (e) {
+        alert("Error generating answers: " + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<span>✨ Generate AI Answers</span>`;
+        document.querySelectorAll(".question-action-btn").forEach(b => b.disabled = false);
+      }
+    }
+
+    async function triggerExport() {
+      if (!currentQuestionnaire) return;
+      const btn = document.getElementById("exportBtn");
+      btn.disabled = true;
+      btn.innerHTML = `<span class="animate-spin inline-block mr-1">⟳</span> Mutating OpenXML...`;
+
+      const orgId = document.getElementById("targetOrgId").value.trim();
+
+      try {
+        const res = await fetch(`/questionnaires/${currentQuestionnaire.questionnaire_id}/export`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${authToken}`,
+            "X-Organization-Id": orgId,
+          }
+        });
+
+        if (!res.ok) {
+          let errMsg = `Export failed (${res.status})`;
+          try {
+            const err = await res.json();
+            errMsg = err.detail || errMsg;
+          } catch {
+            const txt = await res.text();
+            if (txt) errMsg = txt;
+          }
+          throw new Error(errMsg);
+        }
+
+        // Get file blob and trigger download
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.style.display = "none";
+        a.href = url;
+        a.download = `completed_${currentQuestionnaire.filename}`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } catch (e) {
+        alert("Export error: " + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<span>⬇ Export Completed .docx</span>`;
+      }
+    }
+
+    // Verify cached session on load
+    window.addEventListener("DOMContentLoaded", async () => {
+      if (authToken) {
+        if (authToken.endsWith(".dev") || authToken.includes("=")) {
+          signOut();
+          return;
+        }
+        try {
+          await verifyAndSetToken(authToken);
+        } catch (e) {
+          console.warn("Cached session expired or invalid, signing out:", e);
+          signOut();
+        }
+      }
+    });
+  </script>
+</body>
+</html>
