@@ -195,3 +195,48 @@ ALTER TABLE questions ALTER COLUMN updated_at SET DEFAULT now();
 
 CREATE INDEX IF NOT EXISTS idx_questionnaires_org ON questionnaires(organization_id);
 CREATE INDEX IF NOT EXISTS idx_questions_questionnaire ON questions(questionnaire_id);
+
+-- ---------------------------------------------------------------------
+-- Completed-document persistence & freshness tracking
+-- (migration_004 — additive, safe to re-run)
+--
+-- completed_file_path       – bare relative storage path inside the
+--                             questionnaires bucket, e.g.
+--                             {org_id}/{questionnaire_id}/completed_{questionnaire_id}.docx
+--                             NULL until the first build is triggered.
+--
+-- completed_file_updated_at – timestamp of the last successful build.
+--                             NULL until first build.
+--                             The Next.js frontend compares this against
+--                             MAX(questions.updated_at) to determine whether
+--                             the stored DOCX is stale and needs rebuilding.
+-- ---------------------------------------------------------------------
+ALTER TABLE questionnaires
+    ADD COLUMN IF NOT EXISTS completed_file_path       TEXT,
+    ADD COLUMN IF NOT EXISTS completed_file_updated_at TIMESTAMPTZ;
+
+-- Index to speed up freshness checks (document-status endpoint) which filter
+-- by id + organization_id and read only the two new columns.
+CREATE INDEX IF NOT EXISTS idx_questionnaires_completed_freshness
+    ON questionnaires(organization_id, id)
+    WHERE completed_file_path IS NOT NULL;
+
+-- ---------------------------------------------------------------------
+-- Manual-edit tracking for ONLYOFFICE human polish workflow
+-- (migration_005 — additive, safe to re-run)
+--
+-- has_manual_edits – set to TRUE by the /onlyoffice-callback endpoint
+--                    whenever the ONLYOFFICE Document Server reports a
+--                    successful save (status 2 or 6).
+--
+--                    Exposed through GET /document-status so the Next.js
+--                    frontend can display:
+--                      "This document has manual styling edits. Rebuilding
+--                       will overwrite them."
+--                    before the user triggers POST /build-document.
+--
+--                    Reset to FALSE each time _generate_and_persist_completed_docx
+--                    runs a fresh automated build from agent answers.
+-- ---------------------------------------------------------------------
+ALTER TABLE questionnaires
+    ADD COLUMN IF NOT EXISTS has_manual_edits BOOLEAN DEFAULT FALSE;

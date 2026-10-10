@@ -4,9 +4,25 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     neon_database_url: str
 
-    groq_api_key: str
+    # Comma-separated Groq API keys, e.g. "gsk_abc,gsk_def,gsk_ghi".
+    # A single key without commas works identically to the previous groq_api_key field.
+    groq_api_keys: str
     groq_draft_model: str = "openai/gpt-oss-20b"
     groq_validate_model: str = "openai/gpt-oss-120b"
+
+    @property
+    def parsed_groq_api_keys(self) -> list[str]:
+        """Parse groq_api_keys into a list, stripping whitespace and empty entries.
+
+        Supports both single-key configs ("gsk_abc") and multi-key configs
+        ("gsk_abc, gsk_def, gsk_ghi").  Order is preserved so callers can
+        rely on a stable round-robin sequence.
+        """
+        keys = [k.strip() for k in self.groq_api_keys.split(",")]
+        keys = [k for k in keys if k]
+        if not keys:
+            raise ValueError("groq_api_keys must contain at least one non-empty key")
+        return keys
 
     embedding_model: str = "BAAI/bge-base-en-v1.5"  # 768 dims — must match sql/schema.sql
     embedding_dim: int = 768
@@ -33,6 +49,10 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_jwt_secret: str = ""
     supabase_storage_bucket: str = "questionnaires"
+
+    # Base URL of this FastAPI service, used for ONLYOFFICE callback URLs.
+    # Example: https://api.myapp.com  (no trailing slash)
+    api_base_url: str = "http://localhost:8000"
 
     class Config:
         env_file = ".env"

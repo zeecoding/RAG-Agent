@@ -56,7 +56,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(questionnaires_router)
+app.include_router(questionnaires_router, prefix="/api/v1")
 
 
 # ── Health ────────────────────────────────────────────────────────────
