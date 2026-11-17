@@ -85,19 +85,19 @@ WITH vector_ranked AS (
            ROW_NUMBER() OVER (ORDER BY c.embedding <=> $1::vector) AS vector_rank
     FROM rag_chunks c
     JOIN rag_documents d ON d.id = c.document_id
-    WHERE c.organization_id = $4 AND d.is_archived = false
+    WHERE c.organization_id = $4 AND COALESCE(d.is_archived, false) = false
     ORDER BY c.embedding <=> $1::vector
     LIMIT $2
 ),
 keyword_ranked AS (
     SELECT c.id, c.document_id, c.content, c.heading_path, c.created_at, c.times_used,
            c.metadata, d.effective_date,
-           ts_rank(c.tsv, websearch_to_tsquery('english', $3)) AS keyword_score,
-           ROW_NUMBER() OVER (ORDER BY ts_rank(c.tsv, websearch_to_tsquery('english', $3)) DESC) AS keyword_rank
+           ts_rank(COALESCE(c.tsv, to_tsvector('english', c.content)), websearch_to_tsquery('english', $3)) AS keyword_score,
+           ROW_NUMBER() OVER (ORDER BY ts_rank(COALESCE(c.tsv, to_tsvector('english', c.content)), websearch_to_tsquery('english', $3)) DESC) AS keyword_rank
     FROM rag_chunks c
     JOIN rag_documents d ON d.id = c.document_id
-    WHERE c.organization_id = $4 AND d.is_archived = false
-      AND c.tsv @@ websearch_to_tsquery('english', $3)
+    WHERE c.organization_id = $4 AND COALESCE(d.is_archived, false) = false
+      AND COALESCE(c.tsv, to_tsvector('english', c.content)) @@ websearch_to_tsquery('english', $3)
     ORDER BY keyword_score DESC
     LIMIT $2
 )

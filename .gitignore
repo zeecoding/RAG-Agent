@@ -35,5 +35,6 @@ desktop.ini
 .vscode/
 .idea/
 tests/
+scripts/
 vendor_security_rfp.docx
 vendor_security_rfp_completed.docx

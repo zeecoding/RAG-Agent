@@ -143,19 +143,12 @@ async def download_questionnaire_file(storage_path: str) -> bytes:
         ) from exc
 
 
-# Alias used by the new persistence layer in questionnaires.py so call-sites
-# read symmetrically: download_file_bytes / upload_completed_docx.
+# Alias used across questionnaires.py
 download_file_bytes = download_questionnaire_file
 
 
 async def upload_completed_docx(storage_path: str, file_bytes: bytes) -> str:
-    """Uploads or overwrites (upserts) the mutated completed DOCX into the
-    questionnaires bucket.
-
-    ``storage_path`` is the bare relative path (no bucket prefix), e.g.
-    ``{org_id}/{questionnaire_id}/completed_{questionnaire_id}.docx``.
-    Returns the same storage_path for convenience.
-    """
+    """Uploads or overwrites (upserts) the mutated completed DOCX into the questionnaires bucket."""
     if not settings.supabase_url:
         raise HTTPException(
             status_code=500,
@@ -163,7 +156,6 @@ async def upload_completed_docx(storage_path: str, file_bytes: bytes) -> str:
         )
 
     bucket = _bucket()
-    # Ensure we always work with a bare relative path (strip bucket prefix if caller included it).
     relative_path = _normalize_path(storage_path)
     upload_url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{relative_path}"
 
@@ -190,9 +182,7 @@ async def upload_completed_docx(storage_path: str, file_bytes: bytes) -> str:
                 detail=f"Failed to upload completed DOCX to storage: {response.text}",
             )
 
-        full_path = f"{bucket}/{relative_path}"
-        logger.info("Uploaded completed DOCX to %s", full_path)
-        return storage_path  # caller stores the bare relative path
+        return storage_path
 
     except httpx.RequestError as exc:
         logger.error("Network error uploading completed DOCX: %s", exc)
@@ -203,12 +193,7 @@ async def upload_completed_docx(storage_path: str, file_bytes: bytes) -> str:
 
 
 async def get_docx_signed_url(storage_path: str, expires_in: int = 7200) -> str:
-    """Generates a temporary signed URL valid for ``expires_in`` seconds.
-
-    Suitable for both ONLYOFFICE document loading and direct browser download.
-    ``storage_path`` may be bare (``org/quest/file.docx``) or bucket-prefixed.
-    Returns the full signed URL string.
-    """
+    """Generates a temporary signed URL valid for expires_in seconds."""
     if not settings.supabase_url:
         raise HTTPException(
             status_code=500,
@@ -217,9 +202,7 @@ async def get_docx_signed_url(storage_path: str, expires_in: int = 7200) -> str:
 
     bucket = _bucket()
     relative_path = _normalize_path(storage_path)
-    sign_url = (
-        f"{settings.supabase_url.rstrip('/')}/storage/v1/object/sign/{bucket}/{relative_path}"
-    )
+    sign_url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/sign/{bucket}/{relative_path}"
     headers = _get_headers()
     headers["Content-Type"] = "application/json"
 
@@ -243,19 +226,16 @@ async def get_docx_signed_url(storage_path: str, expires_in: int = 7200) -> str:
             )
 
         data = response.json()
-        signed_url = data.get("signedURL") or data.get("signedUrl") or data.get("signedUrl")
+        signed_url = data.get("signedURL") or data.get("signedUrl")
         if not signed_url:
             raise HTTPException(
                 status_code=502,
                 detail=f"Signed URL missing from Supabase response: {data}",
             )
 
-        # Supabase returns a relative path like /storage/v1/object/sign/...
-        # Prefix with base URL if it starts with a slash.
         if signed_url.startswith("/"):
             signed_url = f"{settings.supabase_url.rstrip('/')}{signed_url}"
 
-        logger.info("Generated signed URL for %s (expires in %ds)", relative_path, expires_in)
         return signed_url
 
     except httpx.RequestError as exc:
@@ -264,3 +244,95 @@ async def get_docx_signed_url(storage_path: str, expires_in: int = 7200) -> str:
             status_code=503,
             detail=f"Storage service unavailable: {str(exc)}",
         ) from exc
+
+
+def _kb_bucket() -> str:
+    return getattr(settings, "supabase_kb_bucket", None) or "kb_docs"
+
+
+async def upload_kb_document_file(
+    organization_id: str,
+    filename: str,
+    file_bytes: bytes,
+    content_type: str = "application/octet-stream",
+) -> str:
+    """Uploads raw organization knowledge base document bytes to Supabase Storage in the private kb_docs bucket.
+
+    Storage path format: kb_docs/{organization_id}/{filename}
+    Returns the full storage path (e.g. kb_docs/{organization_id}/{filename}).
+    """
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        logger.warning("Supabase storage not configured; skipping kb_docs upload for %s", filename)
+        return ""
+
+    bucket = _kb_bucket()
+    relative_path = f"{organization_id}/{filename}"
+    upload_url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{relative_path}"
+
+    headers = _get_headers()
+    headers["x-upsert"] = "true"
+    headers["Content-Type"] = content_type
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                upload_url,
+                headers=headers,
+                content=file_bytes,
+            )
+
+        if response.status_code not in (200, 201):
+            logger.warning(
+                "Supabase kb_docs upload warning (%d): %s",
+                response.status_code,
+                response.text,
+            )
+            return ""
+
+        full_storage_path = f"{bucket}/{relative_path}"
+        logger.info("Successfully uploaded KB document to %s", full_storage_path)
+        return full_storage_path
+
+    except Exception as exc:
+        logger.warning("Network or client error during Supabase kb_docs upload: %s", exc)
+        return ""
+
+
+async def create_signed_kb_url(
+    organization_id: str,
+    filename: str,
+    expires_in: int = 3600,
+) -> Optional[str]:
+    """Generates a time-limited signed URL to download or view a private kb_docs file."""
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        return None
+
+    bucket = _kb_bucket()
+    relative_path = f"{organization_id}/{filename}"
+    sign_url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/sign/{bucket}/{relative_path}"
+    headers = _get_headers()
+    headers["Content-Type"] = "application/json"
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                sign_url,
+                headers=headers,
+                json={"expiresIn": expires_in},
+            )
+
+        if response.status_code not in (200, 201):
+            return None
+
+        data = response.json()
+        signed_url = data.get("signedURL") or data.get("signedUrl")
+        if not signed_url:
+            return None
+
+        if signed_url.startswith("/"):
+            signed_url = f"{settings.supabase_url.rstrip('/')}{signed_url}"
+
+        return signed_url
+    except Exception as exc:
+        logger.warning("Could not generate signed kb_docs URL: %s", exc)
+        return None

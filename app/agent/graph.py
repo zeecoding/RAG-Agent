@@ -1,12 +1,17 @@
 """LangGraph implementation of the Answer Generation Agent (FYP Module 3)."""
+import difflib
 import logging
+import re
 from dataclasses import replace
+from datetime import datetime
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.db.pool import get_pool
+from app.exporter.docx_engine import strip_question_prefix
 from app.rag.confidence import score_answer
 from app.rag.groq_client import get_groq_client
 from app.rag.guardrails import (
@@ -41,6 +46,7 @@ class AgentState(TypedDict, total=False):
     injection_detected: bool
     injection_category: str
     guardrail_events: list[dict]
+    library_match: dict | None
 
 
 SYSTEM_DRAFT = (
@@ -52,7 +58,8 @@ SYSTEM_DRAFT = (
     "- State commitments plainly; do not hedge unless the documentation specifies a procedural exception.\n"
     "- Write exclusively in complete, flowing narrative paragraphs. Synthesize multiple conditions into "
     "natural prose using standard transition words (e.g., 'First, ... Additionally, ... In contrast, ...') "
-    "rather than fragmented clauses.\n\n"
+    "rather than fragmented clauses.\n"
+    "- Always present numbers, metrics, percentages, durations, and timeframes as numerical digits (e.g., write '72' instead of 'seventy-two', '30 days' instead of 'thirty days'); never spell numbers out in words.\n\n"
     "Markdown & Formatting Ban (CRITICAL):\n"
     "- Absolutely NEVER use markdown styling. Never use asterisks for bolding or italics (e.g., do NOT write "
     "**text**, *text*, or include single or double asterisks under any circumstance).\n"
@@ -204,6 +211,58 @@ def route_after_input_guard(state: AgentState) -> str:
     return "retrieve"
 
 
+async def _find_matching_library_answer(question: str, organization_id: str) -> dict | None:
+    """Searches the organization's approved Answer Library for an existing response to the same or highly similar question."""
+    pool = get_pool()
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, question, draft_answer, confidence, source_file, rfp_name, project_name
+                FROM answer_library_items
+                WHERE organization_id = $1 AND status = 'APPROVED'::"QuestionStatus" AND draft_answer IS NOT NULL
+                ORDER BY updated_at DESC
+                LIMIT 100
+                """,
+                organization_id,
+            )
+            if not rows:
+                return None
+
+            norm_target = strip_question_prefix(question).strip().lower()
+            norm_target_clean = re.sub(r"[^\w\s]", "", norm_target).strip()
+
+            best_match = None
+            highest_ratio = 0.0
+
+            for r in rows:
+                lib_q = r["question"]
+                norm_lib = strip_question_prefix(lib_q).strip().lower()
+                norm_lib_clean = re.sub(r"[^\w\s]", "", norm_lib).strip()
+
+                if norm_target_clean == norm_lib_clean:
+                    match_dict = dict(r)
+                    match_dict["is_exact"] = True
+                    match_dict["ratio"] = 1.0
+                    return match_dict
+
+                ratio = difflib.SequenceMatcher(None, norm_target_clean, norm_lib_clean).ratio()
+                if ratio > highest_ratio:
+                    highest_ratio = ratio
+                    best_match = dict(r)
+
+            if highest_ratio >= 0.82 and best_match:
+                best_match["is_exact"] = highest_ratio >= 0.94
+                best_match["ratio"] = highest_ratio
+                return best_match
+            return None
+    except Exception as exc:
+        logger.warning("Error querying answer library: %s", exc)
+        return None
+
+
 async def node_retrieve(state: AgentState) -> AgentState:
     """Retrieves chunks via hybrid search and sanitizes structural PII from
     chunk content BEFORE it enters any LLM prompt.
@@ -224,6 +283,30 @@ async def node_retrieve(state: AgentState) -> AgentState:
         sanitized_chunks.append(replace(chunk, content=result.clean_text))
         all_redactions.extend(result.redactions_found)
 
+    # ── Check for existing approved answer in Institutional Answer Library ──
+    library_match = await _find_matching_library_answer(state["question"], state["organization_id"])
+    if library_match:
+        logger.info(
+            "Found prior approved answer in Answer Library (ratio=%.2f) for question: %s",
+            library_match.get("ratio", 1.0),
+            state["question"][:60],
+        )
+        lib_chunk = RetrievedChunk(
+            id=f"lib_{library_match['id']}",
+            document_id="institutional_library",
+            content=(
+                f"Approved Response for Question: {library_match['question']}\n\n"
+                f"Institutional Verified Answer:\n{library_match['draft_answer']}"
+            ),
+            heading_path="Verified Answer Library (Approved Baseline)",
+            vector_score=1.0,
+            keyword_score=1.0,
+            combined_score=1.0,
+            content_type="answer_library",
+            effective_date=datetime.now().strftime("%Y-%m-%d"),
+        )
+        sanitized_chunks.insert(0, lib_chunk)
+
     if all_redactions:
         logger.info("Context PII sanitized pre-prompt: %s", all_redactions)
         events.append({
@@ -232,7 +315,11 @@ async def node_retrieve(state: AgentState) -> AgentState:
             "stage": "pre_prompt",
         })
 
-    return {"chunks": sanitized_chunks, "guardrail_events": events}
+    return {
+        "chunks": sanitized_chunks,
+        "guardrail_events": events,
+        "library_match": library_match,
+    }
 
 
 async def node_grade_context(state: AgentState) -> AgentState:
@@ -269,6 +356,16 @@ def _build_context(chunks: list[RetrievedChunk]) -> str:
 async def node_draft(state: AgentState) -> AgentState:
     attempt_num = state.get("attempts", 0) + 1
     logger.info(f"node_draft: attempt {attempt_num}")
+
+    lib_match = state.get("library_match")
+    # If this is an exact match to a prior approved answer, reuse it directly
+    if lib_match and lib_match.get("is_exact"):
+        logger.info(
+            "Directly adopting verified Answer Library response for question: %s",
+            state["question"][:60],
+        )
+        return {"draft": lib_match["draft_answer"], "attempts": attempt_num}
+
     context = _build_context(state.get("chunks", []))
     feedback = state.get("validation_feedback", "")
 
@@ -278,7 +375,17 @@ async def node_draft(state: AgentState) -> AgentState:
             f"\n\nNOTE: The retrieved sources show divergent information: "
             f"{state.get('conflict_description', '')}. Follow Temporal Precedence rules."
         )
-    user_prompt = f"Context:\n{context}\n\nQuestion: {state['question']}{conflict_note}"
+
+    library_instruction = ""
+    if lib_match:
+        library_instruction = (
+            f"\n\nPRIOR APPROVED ANSWER FOUND IN INSTITUTIONAL ANSWER LIBRARY:\n"
+            f"\"{lib_match['draft_answer']}\"\n"
+            f"INSTRUCTION: This answer has already been vetted and approved for our organization. "
+            f"Use this approved response as your base foundation, ensuring complete factual consistency with this verified institutional answer."
+        )
+
+    user_prompt = f"Context:\n{context}\n\nQuestion: {state['question']}{conflict_note}{library_instruction}"
     if feedback:
         user_prompt += f"\n\nYour previous attempt was rejected: {feedback}\nRevise accordingly."
 
@@ -419,6 +526,13 @@ async def node_score(state: AgentState) -> AgentState:
         validation_passed=val_passed,
         retrieval_confidence=retrieval_confidence,
     )
+
+    # When validated against or directly adopted from the approved Answer Library, ensure high confidence
+    if state.get("library_match") and val_passed:
+        lib_conf = float(state["library_match"].get("confidence") or 95.0)
+        score = max(score, lib_conf)
+        level = "green"
+
     logger.info(f"node_score: score={score}, level={level}, breakdown={breakdown}")
     return {"confidence_score": score, "confidence_level": level, "confidence_breakdown": breakdown}
 

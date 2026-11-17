@@ -21,9 +21,11 @@ async def init_pool() -> asyncpg.Pool:
     _pool = await asyncpg.create_pool(
         dsn=settings.neon_database_url,
         min_size=1,
-        max_size=5,
+        max_size=10,
         init=_init_connection,
         command_timeout=30,
+        statement_cache_size=0,  # Critical for PgBouncer / Neon transaction pooler compatibility
+        max_inactive_connection_lifetime=300.0,
     )
     return _pool
 

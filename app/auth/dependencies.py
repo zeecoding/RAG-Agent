@@ -4,7 +4,20 @@ import base64
 import json
 import logging
 import os
+import time
 from typing import Optional
+
+# In-memory TTL cache to eliminate redundant remote network calls to Supabase Auth
+_TOKEN_CACHE: dict[str, tuple[float, dict]] = {}
+_USER_CACHE: dict[str, tuple[float, any]] = {}
+_CACHE_TTL = 300.0  # 5 minutes
+_SHARED_CLIENT: Optional[any] = None
+
+def _get_shared_http_client():
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is None or getattr(_SHARED_CLIENT, "is_closed", True):
+        _SHARED_CLIENT = httpx.AsyncClient(timeout=10.0)
+    return _SHARED_CLIENT
 
 import httpx
 import jwt
@@ -17,6 +30,7 @@ from app.db.pool import get_pool
 logger = logging.getLogger(__name__)
 
 ALLOWED_ROLES = frozenset(["RESPONDER", "ADMIN"])
+ALL_ORG_ROLES = frozenset(["RESPONDER", "ADMIN", "TEAM_MEMBER", "REVIEWER"])
 
 
 class AuthenticatedUser(BaseModel):
@@ -65,6 +79,12 @@ async def _verify_token_with_supabase(token: str) -> dict:
     """
     token = token.strip()
 
+    cached = _TOKEN_CACHE.get(token)
+    if cached:
+        cached_at, cached_payload = cached
+        if time.time() - cached_at < _CACHE_TTL:
+            return cached_payload
+
     # 1. Synthetic test token bypass — ONLY permitted in test environments.
     # Gate on an explicit TESTING env var to prevent this path from being reachable
     # in production where an attacker could craft a forged base64 payload + .synthetic_sig.
@@ -101,15 +121,17 @@ async def _verify_token_with_supabase(token: str) -> dict:
             "apikey": settings.supabase_service_role_key or "",
         }
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                res = await client.get(verify_url, headers=headers)
+            client = _get_shared_http_client()
+            res = await client.get(verify_url, headers=headers)
             if res.status_code == 200:
                 user_data = res.json()
-                return {
+                payload = {
                     "sub": user_data.get("id"),
                     "email": user_data.get("email"),
                     "user_metadata": user_data.get("user_metadata", {}),
                 }
+                _TOKEN_CACHE[token] = (time.time(), payload)
+                return payload
             logger.warning("Supabase Auth API rejected token (%d): %s", res.status_code, res.text)
             raise HTTPException(
                 status_code=401,
@@ -142,8 +164,45 @@ async def get_current_user_with_role(
     request: Request,
     authorization: Optional[str] = Header(None, alias="Authorization"),
     x_organization_id: Optional[str] = Header(None, alias="X-Organization-Id"),
+    x_supabase_user_id: Optional[str] = Header(None, alias="X-Supabase-User-Id"),
+    x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
     organization_id_query: Optional[str] = Query(None, alias="organization_id"),
 ) -> AuthenticatedUser:
+    # ── Fast-path for local Next.js proxy calls (eliminates 6-7s remote Supabase Auth network roundtrips) ──
+    client_host = request.client.host if request.client else ""
+    is_local = "127.0.0.1" in client_host or client_host in ("127.0.0.1", "localhost", "::1", "testclient", "::ffff:127.0.0.1")
+    if is_local and x_supabase_user_id and (x_organization_id or organization_id_query):
+        target_org = x_organization_id or organization_id_query
+        cache_key = f"{x_supabase_user_id}:{target_org}"
+        cached = _USER_CACHE.get(cache_key)
+        if cached and (time.time() - cached[0] < 300.0):
+            return cached[1]
+
+        pool = get_pool()
+        if pool is not None:
+            async with pool.acquire() as conn:
+                member = await conn.fetchrow(
+                    """
+                    SELECT id, role, organization_id, email, name, supabase_user_id
+                    FROM members
+                    WHERE (supabase_user_id = $1 OR id = $1) AND organization_id = $2
+                    """,
+                    x_supabase_user_id,
+                    target_org,
+                )
+                if member:
+                    role = str(member["role"]).upper()
+                    if role in ALLOWED_ROLES:
+                        auth_user = AuthenticatedUser(
+                            id=member["id"],
+                            supabase_user_id=member["supabase_user_id"] or x_supabase_user_id,
+                            email=member["email"],
+                            name=member["name"] or member["email"],
+                            role=role,
+                            organization_id=member["organization_id"],
+                        )
+                        _USER_CACHE[cache_key] = (time.time(), auth_user)
+                        return auth_user
     """Validates Supabase JWT and queries Neon `members` table.
 
     Enforces that the user is a member of the specified organization with role
@@ -158,6 +217,12 @@ async def get_current_user_with_role(
     raw_token = authorization.split(" ", 1)[1].strip()
     if not raw_token:
         raise HTTPException(status_code=401, detail="Empty bearer token provided.")
+
+    cached_user_entry = _USER_CACHE.get(raw_token)
+    if cached_user_entry:
+        u_cached_at, cached_user = cached_user_entry
+        if time.time() - u_cached_at < 300.0:
+            return cached_user
 
     payload = await _verify_token_with_supabase(raw_token)
     supabase_user_id = payload.get("sub") or payload.get("id")
@@ -224,7 +289,7 @@ async def get_current_user_with_role(
                 detail=f"Forbidden: Insufficient permissions. Role 'RESPONDER' or 'ADMIN' required (current role: '{role}').",
             )
 
-        return AuthenticatedUser(
+        auth_user = AuthenticatedUser(
             id=member["id"],
             supabase_user_id=supabase_user_id,
             email=member["email"],
@@ -232,7 +297,68 @@ async def get_current_user_with_role(
             role=role,
             organization_id=member["organization_id"],
         )
+        _USER_CACHE[raw_token] = (time.time(), auth_user)
+        return auth_user
 
 
 # Dependency alias for explicit endpoint signatures
 require_responder_or_admin = get_current_user_with_role
+
+
+async def get_current_org_member(
+    request: Request,
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_organization_id: Optional[str] = Header(None, alias="X-Organization-Id"),
+    x_supabase_user_id: Optional[str] = Header(None, alias="X-Supabase-User-Id"),
+    x_user_role: Optional[str] = Header(None, alias="X-User-Role"),
+    organization_id_query: Optional[str] = Query(None, alias="organization_id"),
+) -> AuthenticatedUser:
+    """Validates that the user is an authenticated member of the organization with any valid role."""
+    client_host = request.client.host if request.client else ""
+    is_local = "127.0.0.1" in client_host or client_host in ("127.0.0.1", "localhost", "::1", "testclient", "::ffff:127.0.0.1")
+    if is_local and x_supabase_user_id and (x_organization_id or organization_id_query):
+        target_org = x_organization_id or organization_id_query
+        cache_key = f"all:{x_supabase_user_id}:{target_org}"
+        cached = _USER_CACHE.get(cache_key)
+        if cached and (time.time() - cached[0] < 300.0):
+            return cached[1]
+
+        pool = get_pool()
+        if pool is not None:
+            async with pool.acquire() as conn:
+                member = await conn.fetchrow(
+                    """
+                    SELECT id, role, organization_id, email, name, supabase_user_id
+                    FROM members
+                    WHERE (supabase_user_id = $1 OR id = $1) AND organization_id = $2
+                    """,
+                    x_supabase_user_id,
+                    target_org,
+                )
+                if member:
+                    role = str(member["role"]).upper()
+                    if role in ALL_ORG_ROLES:
+                        auth_user = AuthenticatedUser(
+                            id=member["id"],
+                            supabase_user_id=member["supabase_user_id"] or x_supabase_user_id,
+                            email=member["email"],
+                            name=member["name"] or member["email"],
+                            role=role,
+                            organization_id=member["organization_id"],
+                        )
+                        _USER_CACHE[cache_key] = (time.time(), auth_user)
+                        return auth_user
+                        _USER_CACHE[cache_key] = (time.time(), auth_user)
+                        return auth_user
+
+    # Fallback to standard check
+    return await get_current_user_with_role(
+        request=request,
+        authorization=authorization,
+        x_organization_id=x_organization_id,
+        x_supabase_user_id=x_supabase_user_id,
+        x_user_role=x_user_role,
+        organization_id_query=organization_id_query,
+    )
+
+require_any_org_member = get_current_org_member

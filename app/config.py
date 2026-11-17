@@ -49,10 +49,14 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_jwt_secret: str = ""
     supabase_storage_bucket: str = "questionnaires"
+    supabase_kb_bucket: str = "kb_docs"
 
     # Base URL of this FastAPI service, used for ONLYOFFICE callback URLs.
     # Example: https://api.myapp.com  (no trailing slash)
     api_base_url: str = "http://localhost:8000"
+    onlyoffice_url: str = "http://127.0.0.1:8085"
+    onlyoffice_internal_url: str = "http://127.0.0.1:8085"
+    frontend_url: str = "http://127.0.0.1:3000"
 
     class Config:
         env_file = ".env"
